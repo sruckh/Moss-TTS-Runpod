@@ -9,6 +9,7 @@ A production-ready serverless worker that provides high-quality neural TTS with 
 - **Neural TTS Generation** - State-of-the-art speech synthesis using MOSS-TTS transformer models
 - **Voice Cloning** - Clone any voice using reference audio files
 - **Continuation Mode** - Extend existing audio while maintaining voice consistency
+- **Streaming & Batch Modes** - Choose between streaming base64 PCM chunks or batch S3 upload
 - **Advanced Decoding Controls** - Fine-tune output with temperature, top-p, top-k, and repetition penalty
 - **Long-Form Support** - Optional text chunking with crossfade for extended content
 - **OGG/Opus Encoding** - Efficient audio compression via FFmpeg
@@ -32,6 +33,9 @@ The system consists of four main components:
 
 ![Data Flow Diagram](./docs/diagrams/data-flow.svg)
 
+The worker supports two modes:
+
+### Batch Mode (default)
 1. Client sends request with text and optional reference audio
 2. Handler validates parameters (text length, mode, audio files, decoding ranges)
 3. Model loads lazily on first request (cached for subsequent requests)
@@ -41,6 +45,15 @@ The system consists of four main components:
 7. Audio encoded to OGG/Opus via FFmpeg
 8. File uploaded to S3, presigned URL generated
 9. Response returned with URL and metadata
+
+### Streaming Mode
+1. Client sends request with `stream=true`
+2. Handler validates parameters and routes to streaming engine
+3. Text is chunked (configurable size)
+4. Each chunk is synthesized and yielded immediately as base64 PCM
+5. Chunks are crossfaded for smooth transitions (optional)
+6. Client receives audio incrementally without waiting for full completion
+7. Final "complete" message indicates all chunks have been sent
 
 ## Quick Start
 
@@ -104,6 +117,9 @@ docker push your-registry/moss-tts:latest
 | `DEFAULT_MAX_CHARS_PER_CHUNK` | Characters per chunk when chunking enabled | `300` |
 | `DEFAULT_ENABLE_CROSSFADE` | Enable crossfade between chunks | `true` |
 | `DEFAULT_CROSSFADE_MS` | Crossfade duration in milliseconds | `140` |
+| `DEFAULT_STREAM_MAX_CHARS_PER_CHUNK` | Streaming chunk size override | `150` |
+| `DEFAULT_STREAM_CROSSFADE_MS` | Streaming crossfade override | `100` |
+| `DEFAULT_CHUNK_PAUSE_MS` | Silence between streaming chunks | `300` |
 | `CLEANUP_DAYS` | Days before auto-deleting temp files | `2` |
 
 ## Usage
@@ -179,6 +195,48 @@ Place reference audio files in the configured `AUDIO_VOICES_DIR` or provide HTTP
 }
 ```
 
+### Streaming Mode
+
+```json
+{
+  "input": {
+    "text": "This is a long text that will be streamed in chunks as they're generated.",
+    "mode": "generation",
+    "reference_audio": "speaker.wav",
+    "stream": true,
+    "output_format": "pcm_16",
+    "stream_max_chars_per_chunk": 150,
+    "stream_crossfade_ms": 100,
+    "chunk_pause_ms": 300
+  }
+}
+```
+
+Streaming yields multiple responses:
+
+**Chunk responses:**
+```json
+{
+  "status": "streaming",
+  "chunk": 1,
+  "format": "pcm_16",
+  "audio_chunk": "base64-encoded-int16-pcm-bytes",
+  "sample_rate": 24000
+}
+```
+
+**Final response:**
+```json
+{
+  "status": "complete",
+  "format": "pcm_16",
+  "message": "All chunks streamed",
+  "total_chunks": 3
+}
+```
+
+The client should decode base64 audio chunks and concatenate them. Audio is signed 16-bit PCM at 24kHz.
+
 ### Health Check
 
 ```json
@@ -253,13 +311,20 @@ Error response:
 | `max_chars_per_chunk` | int | No | Characters per chunk (50-1000, default: 300) |
 | `enable_crossfade` | bool | No | Enable crossfade between chunks (default: true) |
 | `crossfade_ms` | int | No | Crossfade duration (0-2000, default: 140) |
+| `stream` | bool | No | Enable streaming mode (default: false) |
+| `output_format` | string | No | Streaming output format - only `pcm_16` supported |
+| `stream_max_chars_per_chunk` | int | No | Streaming chunk size override (50-1000, default: 150) |
+| `stream_crossfade_ms` | int | No | Streaming crossfade override (0-2000) |
+| `chunk_pause_ms` | int | No | Silence between streaming chunks (0-2000, default: 300) |
 | `session_id` | string | No | Custom session identifier (auto-generated if omitted) |
 
 ### Supported Audio Formats
 
 **Input (reference/prefix audio):** `.wav`, `.mp3`, `.m4a`, `.ogg`, `.flac`, `.webm`, `.aac`, `.opus`
 
-**Output:** `.ogg` (Opus codec, 128k VBR)
+**Batch output:** `.ogg` (Opus codec, 128k VBR)
+
+**Streaming output:** Base64-encoded signed 16-bit PCM at model sample rate (24kHz)
 
 ## Development
 

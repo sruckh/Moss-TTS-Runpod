@@ -6,9 +6,10 @@ import importlib.util
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 from urllib.parse import urlparse
 
+import numpy as np
 import torch
 
 import config
@@ -379,6 +380,167 @@ class MossTTSInference:
             audio_top_k=audio_top_k,
             audio_repetition_penalty=audio_repetition_penalty,
         )
+
+    def generate_audio_stream_decoded(
+        self,
+        text: str,
+        mode: str = "generation",
+        reference_audio: Optional[str] = None,
+        prefix_audio: Optional[str] = None,
+        expected_tokens: Optional[int] = None,
+        max_new_tokens: int = config.DEFAULT_MAX_NEW_TOKENS,
+        audio_temperature: float = config.DEFAULT_AUDIO_TEMPERATURE,
+        audio_top_p: float = config.DEFAULT_AUDIO_TOP_P,
+        audio_top_k: int = config.DEFAULT_AUDIO_TOP_K,
+        audio_repetition_penalty: float = config.DEFAULT_AUDIO_REPETITION_PENALTY,
+        max_chars_per_chunk: int = 150,
+        enable_crossfade: bool = True,
+        crossfade_ms: int = 100,
+        chunk_pause_ms: int = 300,
+    ) -> Generator[Dict[str, Any], None, None]:
+        """
+        Generate streaming audio chunks as base64-encoded signed int16 PCM.
+
+        Each text chunk is synthesized and yielded immediately so the client
+        receives audio as soon as the first chunk finishes inference, rather
+        than waiting for all chunks to complete.
+
+        When crossfade is enabled, only the last `crossfade_ms` of each chunk
+        is held back and blended with the start of the next chunk.
+
+        Yields:
+            Dictionaries with streaming chunk data:
+            - {"status": "streaming", "chunk": int, "format": "pcm_16",
+               "audio_chunk": base64_pcm_bytes, "sample_rate": int}
+            - {"status": "complete", "format": "pcm_16", "total_chunks": int}
+        """
+        import base64
+        import traceback
+
+        self._load_model()
+
+        resolved_reference = self._resolve_voice_path_or_url(reference_audio)
+        resolved_prefix = self._resolve_voice_path_or_url(prefix_audio)
+
+        try:
+            chunks = chunk_text(text, max_chars=max_chars_per_chunk) if max_chars_per_chunk and max_chars_per_chunk > 0 else [text]
+            if not chunks:
+                yield {"error": "Text is empty after normalization"}
+                return
+
+            output_sample_rate = None
+            crossfade_samples = 0
+            pause_samples = 0
+            crossfade_tail = None
+            chunk_num = 0
+
+            def _to_int16_bytes(tensor: torch.Tensor) -> str:
+                """Convert float tensor to base64-encoded int16 PCM."""
+                arr = tensor.detach().cpu().numpy()
+                if arr.dtype == np.float32 or arr.dtype == np.float64:
+                    arr = np.clip(arr, -1.0, 1.0)
+                    arr = (arr * 32767).astype(np.int16)
+                else:
+                    arr = arr.astype(np.int16)
+                return base64.b64encode(arr.tobytes()).decode("utf-8")
+
+            for i, chunk_text_content in enumerate(chunks):
+                log.info("Streaming chunk %s/%s", i + 1, len(chunks))
+
+                audio_tensor, _ = self._generate_single(
+                    text=chunk_text_content,
+                    mode=mode,
+                    reference_audio=resolved_reference,
+                    prefix_audio=resolved_prefix,
+                    expected_tokens=expected_tokens,
+                    max_new_tokens=max_new_tokens,
+                    audio_temperature=audio_temperature,
+                    audio_top_p=audio_top_p,
+                    audio_top_k=audio_top_k,
+                    audio_repetition_penalty=audio_repetition_penalty,
+                )
+
+                if audio_tensor.dim() > 1:
+                    audio_tensor = audio_tensor.reshape(-1)
+
+                if output_sample_rate is None:
+                    output_sample_rate = self._sample_rate
+                    crossfade_samples = (
+                        int(output_sample_rate * (float(crossfade_ms) / 1000.0))
+                        if crossfade_ms and enable_crossfade
+                        else 0
+                    )
+                    pause_samples = int(output_sample_rate * (float(chunk_pause_ms) / 1000.0)) if chunk_pause_ms > 0 else 0
+                    log.info("Model output sample rate: %s", output_sample_rate)
+
+                is_last_chunk = (i == len(chunks) - 1)
+
+                # Blend crossfade tail from previous chunk with start of this chunk
+                if crossfade_tail is not None:
+                    if crossfade_samples > 0:
+                        cf = min(crossfade_samples, len(crossfade_tail), len(audio_tensor))
+                        if cf > 0:
+                            fade_out = torch.linspace(1.0, 0.0, cf, device=audio_tensor.device, dtype=audio_tensor.dtype)
+                            fade_in = 1.0 - fade_out
+                            blended = crossfade_tail * fade_out + audio_tensor[:cf] * fade_in
+                            audio_to_emit = torch.cat([blended, audio_tensor[cf:]], dim=-1)
+                        else:
+                            audio_to_emit = torch.cat([crossfade_tail, audio_tensor], dim=-1)
+                    else:
+                        audio_to_emit = torch.cat([crossfade_tail, audio_tensor], dim=-1)
+                else:
+                    audio_to_emit = audio_tensor
+
+                # Hold back crossfade overlap for next chunk (unless last chunk)
+                if crossfade_samples > 0 and not is_last_chunk and len(audio_to_emit) > crossfade_samples:
+                    crossfade_tail = audio_to_emit[-crossfade_samples:]
+                    audio_to_emit = audio_to_emit[:-crossfade_samples]
+                else:
+                    crossfade_tail = None
+
+                # Append silence gap after non-last chunks for natural pacing
+                if not is_last_chunk and pause_samples > 0:
+                    silence = torch.zeros(pause_samples, device=audio_to_emit.device, dtype=audio_to_emit.dtype)
+                    audio_to_emit = torch.cat([audio_to_emit, silence], dim=-1)
+
+                # Yield this chunk's audio immediately
+                if audio_to_emit is not None and len(audio_to_emit) > 0:
+                    chunk_num += 1
+                    yield {
+                        "status": "streaming",
+                        "chunk": chunk_num,
+                        "format": "pcm_16",
+                        "audio_chunk": _to_int16_bytes(audio_to_emit),
+                        "sample_rate": output_sample_rate,
+                    }
+
+            # Flush any remaining crossfade tail
+            if crossfade_tail is not None and len(crossfade_tail) > 0:
+                chunk_num += 1
+                yield {
+                    "status": "streaming",
+                    "chunk": chunk_num,
+                    "format": "pcm_16",
+                    "audio_chunk": _to_int16_bytes(crossfade_tail),
+                    "sample_rate": output_sample_rate or config.DEFAULT_SAMPLE_RATE,
+                }
+
+            yield {
+                "status": "complete",
+                "format": "pcm_16",
+                "message": "All chunks streamed",
+                "total_chunks": chunk_num,
+            }
+
+        except Exception as exc:
+            error_trace = traceback.format_exc()
+            log.error("Streaming mode failed: %s", exc)
+            log.error("Traceback: %s", error_trace)
+            yield {
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "traceback": error_trace
+            }
 
     def cleanup(self) -> None:
         if self._model is not None:

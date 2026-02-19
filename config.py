@@ -43,6 +43,11 @@ DEFAULT_MAX_CHARS_PER_CHUNK = int(os.environ.get("DEFAULT_MAX_CHARS_PER_CHUNK", 
 DEFAULT_ENABLE_CROSSFADE = os.environ.get("DEFAULT_ENABLE_CROSSFADE", "true").lower() == "true"
 DEFAULT_CROSSFADE_MS = int(os.environ.get("DEFAULT_CROSSFADE_MS", "140"))
 
+# Streaming defaults
+DEFAULT_STREAM_MAX_CHARS_PER_CHUNK = int(os.environ.get("DEFAULT_STREAM_MAX_CHARS_PER_CHUNK", "150"))
+DEFAULT_STREAM_CROSSFADE_MS = int(os.environ.get("DEFAULT_STREAM_CROSSFADE_MS", "100"))
+DEFAULT_CHUNK_PAUSE_MS = int(os.environ.get("DEFAULT_CHUNK_PAUSE_MS", "300"))
+
 CLEANUP_DAYS = int(os.environ.get("CLEANUP_DAYS", "2"))
 
 
@@ -79,6 +84,10 @@ class Config:
         self.default_max_chars_per_chunk = DEFAULT_MAX_CHARS_PER_CHUNK
         self.default_enable_crossfade = DEFAULT_ENABLE_CROSSFADE
         self.default_crossfade_ms = DEFAULT_CROSSFADE_MS
+
+        self.default_stream_max_chars_per_chunk = DEFAULT_STREAM_MAX_CHARS_PER_CHUNK
+        self.default_stream_crossfade_ms = DEFAULT_STREAM_CROSSFADE_MS
+        self.default_chunk_pause_ms = DEFAULT_CHUNK_PAUSE_MS
 
         self.sample_rate = DEFAULT_SAMPLE_RATE
         self.AUDIO_EXTS = AUDIO_EXTS

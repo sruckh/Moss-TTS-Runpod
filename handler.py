@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 import traceback
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Generator, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -297,6 +297,35 @@ def extract_and_validate_params(job_input: Dict[str, Any]):
     if crossfade_ms < 0 or crossfade_ms > 2000:
         return None, {"error": "crossfade_ms must be between 0 and 2000"}
 
+    # Streaming parameters
+    stream = parse_bool(job_input.get("stream"), False)
+    output_format = job_input.get("output_format", "pcm_16")
+    stream_max_chars_per_chunk = job_input.get("stream_max_chars_per_chunk")
+    stream_crossfade_ms = job_input.get("stream_crossfade_ms")
+    chunk_pause_ms = int(job_input.get("chunk_pause_ms", config.default_chunk_pause_ms))
+
+    if stream_max_chars_per_chunk is not None:
+        try:
+            stream_max_chars_per_chunk = int(stream_max_chars_per_chunk)
+            if stream_max_chars_per_chunk < 50 or stream_max_chars_per_chunk > 1000:
+                return None, {"error": "stream_max_chars_per_chunk must be between 50 and 1000"}
+        except Exception:
+            return None, {"error": "stream_max_chars_per_chunk must be an integer"}
+
+    if stream_crossfade_ms is not None:
+        try:
+            stream_crossfade_ms = int(stream_crossfade_ms)
+            if stream_crossfade_ms < 0 or stream_crossfade_ms > 2000:
+                return None, {"error": "stream_crossfade_ms must be between 0 and 2000"}
+        except Exception:
+            return None, {"error": "stream_crossfade_ms must be an integer"}
+
+    if chunk_pause_ms < 0 or chunk_pause_ms > 2000:
+        return None, {"error": "chunk_pause_ms must be between 0 and 2000"}
+
+    if output_format != "pcm_16":
+        return None, {"error": "Invalid output_format. Only 'pcm_16' is currently supported"}
+
     session_id = str(job_input.get("session_id") or uuid4())
 
     return {
@@ -314,6 +343,11 @@ def extract_and_validate_params(job_input: Dict[str, Any]):
         "max_chars_per_chunk": max_chars_per_chunk,
         "enable_crossfade": enable_crossfade,
         "crossfade_ms": crossfade_ms,
+        "stream": stream,
+        "output_format": output_format,
+        "stream_max_chars_per_chunk": stream_max_chars_per_chunk,
+        "stream_crossfade_ms": stream_crossfade_ms,
+        "chunk_pause_ms": chunk_pause_ms,
         "session_id": session_id,
     }, None
 
@@ -385,6 +419,51 @@ def handler_batch(job_input: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+def handler_stream(job_input: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
+    """
+    Streaming mode handler - yields base64 PCM chunks as they're generated.
+
+    Args:
+        job_input: Job input dictionary
+
+    Yields:
+        Dictionaries with streaming chunk data
+    """
+    params, error = extract_and_validate_params(job_input)
+    if error:
+        log.error(f"Parameter validation failed: {error}")
+        yield error
+        return
+
+    try:
+        inference_engine = get_inference_engine()
+        yield from inference_engine.generate_audio_stream_decoded(
+            text=params["text"],
+            mode=params["mode"],
+            reference_audio=params["reference_audio"],
+            prefix_audio=params["prefix_audio"],
+            expected_tokens=params["expected_tokens"],
+            max_new_tokens=params["max_new_tokens"],
+            audio_temperature=params["audio_temperature"],
+            audio_top_p=params["audio_top_p"],
+            audio_top_k=params["audio_top_k"],
+            audio_repetition_penalty=params["audio_repetition_penalty"],
+            max_chars_per_chunk=params["stream_max_chars_per_chunk"] or params["max_chars_per_chunk"],
+            enable_crossfade=params["enable_crossfade"],
+            crossfade_ms=params["stream_crossfade_ms"] if params["stream_crossfade_ms"] is not None else params["crossfade_ms"],
+            chunk_pause_ms=params["chunk_pause_ms"],
+        )
+    except Exception as exc:
+        trace = traceback.format_exc()
+        log.error(f"Streaming mode failed: {exc}")
+        log.error(trace)
+        yield {
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": trace,
+        }
+
+
 def handler(job: Dict[str, Any]):
     job_id = job.get("id")
     job_input = job.get("input", {})
@@ -393,9 +472,18 @@ def handler(job: Dict[str, Any]):
         yield health_check()
         return
 
-    log.info(f"[{job_id}] Processing request with keys: {list(job_input.keys())}")
+    stream = job_input.get("stream", False)
+    output_format = job_input.get("output_format", "pcm_16")
+
+    if stream:
+        log.info(f"[{job_id}] Streaming mode: format={output_format}")
+        yield from handler_stream(job_input)
+        return
+
+    # Batch mode - generate and upload
+    log.info(f"[{job_id}] Batch mode - input keys: {list(job_input.keys())}")
     result = handler_batch(job_input)
-    log.info(f"[{job_id}] Result status: {result.get('status', result.get('error', 'unknown'))}")
+    log.info(f"[{job_id}] Batch mode result status: {result.get('status', result.get('error', 'unknown'))}")
     yield result
 
 
