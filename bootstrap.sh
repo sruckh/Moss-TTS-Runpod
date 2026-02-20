@@ -96,13 +96,11 @@ INSTALL_SENTINEL="$VENV_DIR/.install_complete"
 if [ ! -f "$INSTALL_SENTINEL" ]; then
     log "=== First-time setup: creating virtual environment ==="
 
-    # Remove any partial venv left by a previous failed attempt so we start clean.
-    if [ -d "$VENV_DIR" ]; then
-        log "Removing incomplete venv from previous attempt..."
-        rm -rf "$VENV_DIR"
-    fi
-
-    python3.12 -m venv "$VENV_DIR"
+    # --clear deletes the venv contents before recreating, safely removing any
+    # partial install from a previous failed attempt. This avoids rm -rf which
+    # can fail on network volumes (NFS "Directory not empty" even with -rf).
+    log "Creating virtual environment (--clear removes any partial previous install)..."
+    python3.12 -m venv --clear "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
 
     # Install MOSS-TTS package (torch 2.9.1+cu128 and all other deps come
