@@ -72,12 +72,31 @@ export UV_LINK_MODE=copy
 export UV_CACHE_DIR="$INSTALL_DIR/.uv_cache"
 mkdir -p "$UV_CACHE_DIR"
 
+# Check if environment is actually functional
+is_env_broken() {
+    if ! python -c "import boto3, botocore, runpod, torch, transformers" &>/dev/null; then
+        return 0 # Broken
+    fi
+    return 1 # OK
+}
+
 SETUP_MARKER="$VENV_DIR/.setup_complete"
+SHOULD_INSTALL=0
+
 if [ ! -f "$SETUP_MARKER" ]; then
-    log "Installing MOSS-TTS dependencies with uv"
+    log "Setup marker missing; triggering install"
+    SHOULD_INSTALL=1
+elif is_env_broken; then
+    log "Virtual environment appears broken or incomplete; triggering repair install"
+    SHOULD_INSTALL=1
+fi
+
+if [ "$SHOULD_INSTALL" -eq 1 ]; then
+    log "Installing/Repairing MOSS-TTS dependencies with uv"
     check_resources
 
     log "Installing MOSS-TTS and runtime extras"
+    # We include botocore explicitly to be safe
     (cd "$SRC_DIR" && uv pip install \
         --index-url https://download.pytorch.org/whl/cu128 \
         --extra-index-url https://pypi.org/simple \
@@ -90,10 +109,7 @@ if [ ! -f "$SETUP_MARKER" ]; then
         hf_transfer)
 
     log "Verifying environment integrity"
-    uv pip check || {
-        log "WARNING: Dependency check failed. Attempting to fix missing dependencies..."
-        uv pip install botocore urllib3
-    }
+    uv pip check || log "WARNING: uv pip check reported issues"
 
     if [ "$ENABLE_FLASH_ATTN" = "true" ]; then
         log "Attempting optional flash-attn install"
@@ -103,7 +119,7 @@ if [ ! -f "$SETUP_MARKER" ]; then
     check_resources
     touch "$SETUP_MARKER"
 else
-    log "Virtual environment already initialized; skipping package reinstall"
+    log "Virtual environment verified; skipping package reinstall"
 fi
 
 export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-}"
