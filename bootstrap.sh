@@ -74,7 +74,8 @@ mkdir -p "$UV_CACHE_DIR"
 
 # Check if environment is actually functional
 is_env_broken() {
-    if ! python -c "import boto3, botocore, runpod, torch, transformers" &>/dev/null; then
+    log "Verifying core dependencies..."
+    if ! python -c "import boto3; import botocore; import runpod; import torch; import transformers; print('Core imports successful')" 2>&1; then
         return 0 # Broken
     fi
     return 1 # OK
@@ -84,20 +85,23 @@ SETUP_MARKER="$VENV_DIR/.setup_complete"
 SHOULD_INSTALL=0
 
 if [ ! -f "$SETUP_MARKER" ]; then
-    log "Setup marker missing; triggering install"
+    log "Setup marker missing; triggering fresh install"
     SHOULD_INSTALL=1
 elif is_env_broken; then
-    log "Virtual environment appears broken or incomplete; triggering repair install"
+    log "Virtual environment is corrupted or incomplete; wiping and recreating"
+    rm -rf "$VENV_DIR"
+    uv venv "$VENV_DIR"
+    source "$VENV_DIR/bin/activate"
     SHOULD_INSTALL=1
 fi
 
 if [ "$SHOULD_INSTALL" -eq 1 ]; then
-    log "Installing/Repairing MOSS-TTS dependencies with uv"
+    log "Installing MOSS-TTS dependencies with uv"
     check_resources
 
     log "Installing MOSS-TTS and runtime extras"
-    # We include botocore explicitly to be safe
-    (cd "$SRC_DIR" && uv pip install \
+    # We use a single command to ensure atomic dependency resolution
+    if ! (cd "$SRC_DIR" && uv pip install \
         --index-url https://download.pytorch.org/whl/cu128 \
         --extra-index-url https://pypi.org/simple \
         --index-strategy unsafe-best-match \
@@ -106,10 +110,18 @@ if [ "$SHOULD_INSTALL" -eq 1 ]; then
         boto3 \
         botocore \
         huggingface-hub \
-        hf_transfer)
+        hf_transfer); then
+        log "ERROR: Installation failed"
+        exit 1
+    fi
 
-    log "Verifying environment integrity"
+    log "Verifying environment integrity after install"
     uv pip check || log "WARNING: uv pip check reported issues"
+    
+    if is_env_broken; then
+        log "ERROR: Environment still broken after installation"
+        exit 1
+    fi
 
     if [ "$ENABLE_FLASH_ATTN" = "true" ]; then
         log "Attempting optional flash-attn install"
@@ -117,9 +129,10 @@ if [ "$SHOULD_INSTALL" -eq 1 ]; then
     fi
 
     check_resources
+    sync
     touch "$SETUP_MARKER"
 else
-    log "Virtual environment verified; skipping package reinstall"
+    log "Virtual environment verified; proceeding to model check"
 fi
 
 export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-}"
