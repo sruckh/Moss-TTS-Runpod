@@ -151,13 +151,26 @@ if [ ! -f "$INSTALL_SENTINEL" ]; then
     df -h /tmp "$INSTALL_DIR" 2>/dev/null || true
 
     mkdir -p "$VENV_DIR"
-    cp -a "$LOCAL_VENV/." "$VENV_DIR/"
+    log "Starting cp -a $LOCAL_VENV/. $VENV_DIR/ ..."
+    cp -av "$LOCAL_VENV/." "$VENV_DIR/" 2>&1 | tail -20
+    CP_EXIT=${?}
+    log "Copy command exit code: $CP_EXIT"
 
-    log "Copy complete. Cleaning up local temp venv..."
+    if [ $CP_EXIT -ne 0 ]; then
+        log "ERROR: Copy failed with exit code $CP_EXIT"
+        exit 1
+    fi
+
+    log "Copy complete. Verifying..."
+    ls -la "$VENV_DIR/bin/python3.12" || { log "ERROR: Python not found in copied venv"; exit 1; }
+
+    log "Cleaning up local temp venv..."
     rm -rf "$LOCAL_VENV"
 
     # Write sentinel only after copy succeeds
+    log "Writing sentinel file: $INSTALL_SENTINEL"
     touch "$INSTALL_SENTINEL"
+    ls -la "$INSTALL_SENTINEL" || { log "ERROR: Failed to write sentinel"; exit 1; }
     log "=== First-time setup complete ==="
 
 else
