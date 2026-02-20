@@ -107,10 +107,28 @@ if [ ! -f "$INSTALL_SENTINEL" ]; then
     # from pyproject.toml; the extra-index-url points to the CUDA wheel index).
     # Note: pyproject.toml also pulls in `gradio` as a base dependency; this
     # is upstream behaviour and cannot be avoided without patching the source.
+    #
+    # Retry loop: NFS network volumes can fail pip's atomic dist-info writes
+    # ("No such file or directory" on .tmp files) due to attribute caching.
+    # On the second attempt, already-installed packages are skipped by pip and
+    # the dist-info directories from the partial first attempt already exist,
+    # so the NFS race condition is resolved.
     log "Installing MOSS-TTS package and dependencies (this takes ~10-15 min)..."
-    (cd "$SRC_DIR" && pip install --no-cache-dir \
-        --extra-index-url https://download.pytorch.org/whl/cu128 \
-        -e .)
+    INSTALL_OK=false
+    for attempt in 1 2 3; do
+        log "pip install attempt $attempt/3..."
+        if (cd "$SRC_DIR" && pip install --no-cache-dir \
+            --extra-index-url https://download.pytorch.org/whl/cu128 \
+            -e .); then
+            INSTALL_OK=true
+            break
+        fi
+        [ "$attempt" -lt 3 ] && log "Attempt $attempt failed (NFS write race); retrying in 15s..." && sleep 15
+    done
+    if [ "$INSTALL_OK" != "true" ]; then
+        log "ERROR: MOSS-TTS package installation failed after 3 attempts."
+        exit 1
+    fi
 
     log "Installing flash-attn (prebuilt wheel for torch 2.9, Python 3.12, x86_64)..."
     pip install --no-cache-dir \
