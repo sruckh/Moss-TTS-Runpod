@@ -58,9 +58,9 @@ else
 fi
 
 log "Copying worker files from Docker image"
-cp "/opt/moss-tts/handler.py" "$SRC_DIR/"
-cp "/opt/moss-tts/config.py" "$SRC_DIR/"
-cp "/opt/moss-tts/serverless_engine.py" "$SRC_DIR/"
+cp "$DOCKER_SRC/handler.py" "$SRC_DIR/"
+cp "$DOCKER_SRC/config.py" "$SRC_DIR/"
+cp "$DOCKER_SRC/serverless_engine.py" "$SRC_DIR/"
 
 if [ ! -f "$VENV_DIR/bin/activate" ]; then
     log "Creating virtual environment"
@@ -99,7 +99,8 @@ else
     log "Virtual environment already initialized; skipping package reinstall"
 fi
 
-export PYTHONPATH="$SRC_DIR:$PYTHONPATH"
+export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-}"
+export HF_HUB_ENABLE_HF_TRANSFER=1
 
 if [ ! -f "$MODEL_DIR/config.json" ]; then
     log "Model snapshot not found. Downloading $MODEL_REPO to $MODEL_DIR"
