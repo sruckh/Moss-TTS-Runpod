@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # MOSS-TTS RunPod bootstrap script.
-# Scaffolded after working indexTTS2 implementation for maximum reliability on network volumes.
+# Optimized for reliability and space efficiency on small network volumes.
 
 set -e  # Exit on any error
 
@@ -34,7 +34,6 @@ log() {
 
 log "Log file: $LOG_FILE"
 log "Install directory: $INSTALL_DIR"
-log "Source directory: $SRC_DIR"
 log "Venv directory: $VENV_DIR"
 
 # Ensure required directories exist
@@ -65,47 +64,38 @@ if [ ! -f "$VENV_DIR/bin/activate" ]; then
     pip install --no-cache-dir uv
     export UV_LINK_MODE=copy
 
-    log "Installing PyTorch (CUDA 12.8)..."
-    uv pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 \
-        --index-url https://download.pytorch.org/whl/cu128 || \
-        pip install --no-cache-dir torch==2.9.1+cu128 torchaudio==2.9.1+cu128 \
-            --index-url https://download.pytorch.org/whl/cu128
-
-    log "Installing MOSS-TTS from source (--no-deps)..."
-    (cd "$SRC_DIR" && pip install --no-cache-dir --no-deps -e .)
-
-    log "Installing runtime dependencies..."
-    pip install --no-cache-dir \
-        "transformers==5.0.0" \
-        "safetensors==0.6.2" \
-        "numpy==2.1.0" \
-        "orjson==3.11.4" \
-        "tqdm==4.67.1" \
-        "PyYAML==6.0.3" \
-        "einops==0.8.1" \
-        "scipy==1.16.2" \
-        "librosa==0.11.0" \
-        "tiktoken==0.12.0" \
-        "psutil" "packaging" "ninja" "setuptools" "wheel" "gradio"
-
-    log "Installing RunPod and serverless dependencies..."
-    pip install --no-cache-dir \
+    log "Installing all dependencies (from pyproject.toml + extras)..."
+    # We rely on pyproject.toml for torch and other core deps.
+    # We use --no-cache to avoid filling up the ephemeral disk or the network volume.
+    # We provide the index-url so the specific +cu128 versions can be resolved.
+    (cd "$SRC_DIR" && uv pip install --no-cache \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-best-match \
+        -e . \
         runpod==1.6.1 \
-        boto3 botocore hf_transfer
+        boto3 botocore hf_transfer)
 
     log "=== Virtual environment setup complete ==="
 else
     log "Activating existing virtual environment at $VENV_DIR"
     source "$VENV_DIR/bin/activate"
     
-    # Patch: ensure critical deps are actually functional
+    # Quick integrity check
     if ! python -c "import torch, boto3, botocore, runpod" &>/dev/null; then
-        log "WARNING: Environment check failed. Attempting quick repair..."
-        pip install --no-cache-dir boto3 botocore runpod hf_transfer || true
+        log "WARNING: Environment appears broken. Attempting repair..."
+        # Repair using uv --no-cache for efficiency
+        (cd "$SRC_DIR" && uv pip install --no-cache \
+            --index-url https://download.pytorch.org/whl/cu128 \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e . \
+            runpod==1.6.1 \
+            boto3 botocore hf_transfer) || true
     fi
 fi
 
-# Make sure the source is importable
+# Export environment variables
 export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-}"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
