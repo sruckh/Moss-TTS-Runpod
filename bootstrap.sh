@@ -2,15 +2,15 @@
 
 # MOSS-TTS RunPod Serverless Bootstrap Script
 #
-# First boot (~10-20 min):
+# First boot (~20-30 min):
 #   - clones MOSS-TTS source + initialises git submodule (moss_audio_tokenizer)
-#   - creates Python venv and installs all dependencies
+#   - installs all Python packages to LOCAL disk (/tmp) to avoid NFS failures
+#   - copies completed venv from /tmp to the network volume (one-time bulk copy)
 #   - downloads model weights from HuggingFace
 #
 # Subsequent boots (~seconds):
-#   - activates existing venv
 #   - copies latest handler files from Docker image
-#   - starts the RunPod handler
+#   - starts the RunPod handler using the persisted venv
 
 set -e  # Exit on any error
 
@@ -29,6 +29,13 @@ MODEL_REPO="${MODEL_REPO:-OpenMOSS-Team/MOSS-TTS}"
 MODEL_DIR="${MODEL_DIR:-$INSTALL_DIR/models/$MODEL_REPO}"
 MOSS_REPO="${MOSS_REPO:-https://github.com/OpenMOSS/MOSS-TTS.git}"
 MOSS_REF="${MOSS_REF:-main}"
+
+# Local (non-NFS) staging directory for pip install.
+# pip uses atomic writes (write .tmp → os.replace) which fail on NFS due to
+# attribute caching. Installing to /tmp (local SSD) avoids this entirely.
+# After a successful install we bulk-copy to the network volume with cp,
+# which writes files directly without the atomic-rename pattern.
+LOCAL_VENV="/tmp/moss-venv"
 
 # ---------------------------------------------------------------------------
 # Logging: tee every line to log file AND stdout so RunPod console + file both
@@ -78,86 +85,88 @@ fi
 # take effect on every boot without needing to rebuild the network volume.
 # ---------------------------------------------------------------------------
 log "Copying handler files from Docker image..."
-cp "$DOCKER_SRC/handler.py"          "$SRC_DIR/"
-cp "$DOCKER_SRC/config.py"           "$SRC_DIR/"
+cp "$DOCKER_SRC/handler.py"           "$SRC_DIR/"
+cp "$DOCKER_SRC/config.py"            "$SRC_DIR/"
 cp "$DOCKER_SRC/serverless_engine.py" "$SRC_DIR/"
 
 # ---------------------------------------------------------------------------
-# Python virtual environment (first boot only)
+# Python virtual environment — install to LOCAL disk, then copy to volume.
 #
-# SENTINEL: We use a dedicated marker file written only AFTER all pip installs
-# succeed. Using $VENV_DIR/bin/activate as the guard is unsafe because it is
-# created at venv-creation time, before any packages are installed. A failed
-# pip install would leave activate present but packages missing, causing
-# RunPod to restart into a broken venv → infinite reboot loop.
+# WHY LOCAL FIRST:
+#   pip uses atomic writes: it creates a .tmp file in the same directory as
+#   the target and calls os.replace(tmp, target). On NFS, this fails with
+#   ENOENT because the directory was just created and NFS attribute caching
+#   hasn't propagated it yet. This is not a transient fluke — it will happen
+#   consistently for many packages whenever pip creates new dist-info dirs.
+#
+#   Solution: install to /tmp/moss-venv (local SSD, no NFS). After all
+#   packages install successfully, bulk-copy to the network volume with cp.
+#   cp writes files directly (no atomic-rename), which works reliably on NFS.
+#
+# SENTINEL: Written only after the copy succeeds, so any failure leaves
+#   no sentinel and the next boot retries from scratch.
 # ---------------------------------------------------------------------------
 INSTALL_SENTINEL="$VENV_DIR/.install_complete"
 
 if [ ! -f "$INSTALL_SENTINEL" ]; then
-    log "=== First-time setup: creating virtual environment ==="
+    log "=== First-time setup: installing packages to local disk ==="
 
-    # --clear deletes the venv contents before recreating, safely removing any
-    # partial install from a previous failed attempt. This avoids rm -rf which
-    # can fail on network volumes (NFS "Directory not empty" even with -rf).
-    log "Creating virtual environment (--clear removes any partial previous install)..."
-    python3.12 -m venv --clear "$VENV_DIR"
-    source "$VENV_DIR/bin/activate"
+    # Show available space so we can diagnose if disk is the issue
+    log "Available disk space:"
+    df -h /tmp "$INSTALL_DIR" 2>/dev/null || true
+
+    # Clean any previous partial local attempt
+    log "Creating local venv at $LOCAL_VENV ..."
+    rm -rf "$LOCAL_VENV"
+    python3.12 -m venv "$LOCAL_VENV"
+
+    # Use the local venv's pip directly — do NOT activate (avoids path issues)
+    PIP="$LOCAL_VENV/bin/pip"
 
     # Install MOSS-TTS package (torch 2.9.1+cu128 and all other deps come
     # from pyproject.toml; the extra-index-url points to the CUDA wheel index).
-    # Note: pyproject.toml also pulls in `gradio` as a base dependency; this
-    # is upstream behaviour and cannot be avoided without patching the source.
-    #
-    # Retry loop: NFS network volumes can fail pip's atomic dist-info writes
-    # ("No such file or directory" on .tmp files) due to attribute caching.
-    # On the second attempt, already-installed packages are skipped by pip and
-    # the dist-info directories from the partial first attempt already exist,
-    # so the NFS race condition is resolved.
-    log "Installing MOSS-TTS package and dependencies (this takes ~10-15 min)..."
-    INSTALL_OK=false
-    for attempt in 1 2 3; do
-        log "pip install attempt $attempt/3..."
-        if (cd "$SRC_DIR" && pip install --no-cache-dir \
-            --extra-index-url https://download.pytorch.org/whl/cu128 \
-            -e .); then
-            INSTALL_OK=true
-            break
-        fi
-        [ "$attempt" -lt 3 ] && log "Attempt $attempt failed (NFS write race); retrying in 15s..." && sleep 15
-    done
-    if [ "$INSTALL_OK" != "true" ]; then
-        log "ERROR: MOSS-TTS package installation failed after 3 attempts."
-        exit 1
-    fi
+    log "Installing MOSS-TTS and all dependencies (~10-15 min)..."
+    (cd "$SRC_DIR" && "$PIP" install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cu128 \
+        -e .)
 
     log "Installing flash-attn (prebuilt wheel for torch 2.9, Python 3.12, x86_64)..."
-    pip install --no-cache-dir \
+    "$PIP" install --no-cache-dir \
         "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
-        || log "WARNING: flash-attn install failed — SDPA fallback will be used automatically."
+        || log "WARNING: flash-attn install failed — SDPA fallback will be used."
 
     log "Installing RunPod serverless runtime..."
-    pip install --no-cache-dir \
-        runpod==1.6.1 \
-        boto3 \
-        botocore
+    "$PIP" install --no-cache-dir runpod==1.6.1 boto3 botocore
 
     log "Installing HuggingFace CLI and hf_transfer..."
-    pip install --no-cache-dir "huggingface-hub[cli]" hf_transfer
+    "$PIP" install --no-cache-dir "huggingface-hub[cli]" hf_transfer
 
-    # All installs succeeded — write sentinel so subsequent boots skip this block.
+    # ------------------------------------------------------------------
+    # All packages installed successfully to local disk.
+    # Now bulk-copy to the network volume.
+    # cp writes files directly — no atomic rename — so it works on NFS.
+    # ------------------------------------------------------------------
+    log "Copying venv from local disk to network volume (this may take a few minutes)..."
+    log "Available disk space before copy:"
+    df -h /tmp "$INSTALL_DIR" 2>/dev/null || true
+
+    mkdir -p "$VENV_DIR"
+    cp -a "$LOCAL_VENV/." "$VENV_DIR/"
+
+    log "Copy complete. Cleaning up local temp venv..."
+    rm -rf "$LOCAL_VENV"
+
+    # Write sentinel only after copy succeeds
     touch "$INSTALL_SENTINEL"
-    log "=== Virtual environment setup complete ==="
+    log "=== First-time setup complete ==="
 
 else
-    log "Activating existing virtual environment..."
-    source "$VENV_DIR/bin/activate"
+    log "Existing installation found at $VENV_DIR"
 
-    # Patch: install any newly added runtime dependencies on existing volumes.
-    # These are fast no-ops if the packages are already present.
-    # flash-attn is included here so it is retried if a previous boot failed
-    # to install it (e.g. network error) — || true keeps this non-fatal.
+    # Patch: ensure runtime deps are up to date on existing volumes.
+    # Use 'python -m pip' to avoid shebang path issues in copied venv scripts.
     log "Patching runtime dependencies (no-op if up to date)..."
-    pip install --no-cache-dir -q \
+    "$VENV_DIR/bin/python3.12" -m pip install --no-cache-dir -q \
         runpod==1.6.1 boto3 botocore \
         "huggingface-hub[cli]" hf_transfer \
         "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
@@ -171,19 +180,22 @@ if [ ! -f "$MODEL_DIR/config.json" ]; then
     log "Downloading model '$MODEL_REPO' to $MODEL_DIR ..."
     export HF_HUB_ENABLE_HF_TRANSFER=1
 
-    if [ -n "${HF_TOKEN:-}" ]; then
-        huggingface-cli download "$MODEL_REPO" \
-            --local-dir "$MODEL_DIR" \
-            --token "$HF_TOKEN" || {
-            log "Token download failed; retrying without token..."
-            huggingface-cli download "$MODEL_REPO" \
-                --local-dir "$MODEL_DIR"
-        }
-    else
-        log "HF_TOKEN not set; downloading without authentication..."
-        huggingface-cli download "$MODEL_REPO" \
-            --local-dir "$MODEL_DIR"
-    fi
+    # Use snapshot_download API directly — avoids shebang path issues in the
+    # copied venv's huggingface-cli script.
+    "$VENV_DIR/bin/python3.12" - <<PYEOF
+import os, sys
+from huggingface_hub import snapshot_download
+model_repo = os.environ.get("MODEL_REPO", "$MODEL_REPO")
+model_dir  = "$MODEL_DIR"
+token      = os.environ.get("HF_TOKEN") or None
+print(f"[hf] Downloading {model_repo} → {model_dir}", flush=True)
+try:
+    snapshot_download(model_repo, local_dir=model_dir, token=token)
+    print("[hf] Download complete.", flush=True)
+except Exception as e:
+    print(f"[hf] Download failed: {e}", file=sys.stderr, flush=True)
+    sys.exit(1)
+PYEOF
     log "Model download complete."
 else
     log "Model already present at $MODEL_DIR"
@@ -199,8 +211,9 @@ fi
 
 # ---------------------------------------------------------------------------
 # Start the RunPod handler
+# Run the venv's Python directly (avoids activate script shebang path issues).
 # ---------------------------------------------------------------------------
 log "Starting RunPod handler..."
 export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-}"
 export HF_HUB_ENABLE_HF_TRANSFER=1
-exec python "$SRC_DIR/handler.py"
+exec "$VENV_DIR/bin/python3.12" "$SRC_DIR/handler.py"
