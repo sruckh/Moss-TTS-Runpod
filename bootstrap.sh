@@ -114,7 +114,8 @@ if [ ! -f "$INSTALL_SENTINEL" ]; then
 
     log "Installing flash-attn (prebuilt wheel for torch 2.9, Python 3.12, x86_64)..."
     pip install --no-cache-dir \
-        "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+        "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
+        || log "WARNING: flash-attn install failed — SDPA fallback will be used automatically."
 
     log "Installing RunPod serverless runtime..."
     pip install --no-cache-dir \
