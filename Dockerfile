@@ -17,14 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir uv
 
-# Pre-install core worker dependencies into the image using standard pip
-RUN pip install --no-cache-dir \
-    runpod==1.6.1 \
-    boto3 \
-    botocore \
-    huggingface-hub \
-    hf_transfer
-
 COPY handler.py config.py serverless_engine.py /opt/moss-tts/
 COPY bootstrap.sh /opt/bootstrap.sh
 
