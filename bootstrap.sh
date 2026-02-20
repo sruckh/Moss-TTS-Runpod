@@ -81,6 +81,7 @@ if [ ! -f "$SETUP_MARKER" ]; then
     (cd "$SRC_DIR" && uv pip install \
         --index-url https://download.pytorch.org/whl/cu128 \
         --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-best-match \
         -e . \
         runpod==1.6.1 \
         boto3 \
