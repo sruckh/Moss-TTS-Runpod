@@ -2,5 +2,5 @@
 # MOSS-TTS and PyTorch are installed from the upstream repo in bootstrap.sh.
 runpod==1.6.1
 boto3>=1.34.0
-huggingface-hub
+huggingface_hub[cli]
 hf_transfer

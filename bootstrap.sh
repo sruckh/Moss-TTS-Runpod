@@ -136,10 +136,10 @@ if [ ! -f "$INSTALL_SENTINEL" ]; then
         || log "WARNING: flash-attn install failed — SDPA fallback will be used."
 
     log "Installing RunPod serverless runtime..."
-    "$PIP" install --no-cache-dir runpod==1.6.1 boto3 botocore
+    "$PIP" install --no-cache-dir runpod==1.6.1 boto3 botocore || log "WARNING: RunPod runtime install failed."
 
-    log "Installing HuggingFace CLI and hf_transfer..."
-    "$PIP" install --no-cache-dir "huggingface-hub[cli]" hf_transfer
+    log "Installing HuggingFace CLI (hf) and hf_transfer..."
+    "$PIP" install --no-cache-dir "huggingface_hub[cli]" hf_transfer || log "WARNING: HuggingFace CLI install failed."
 
     # ------------------------------------------------------------------
     # All packages installed successfully to local disk.
@@ -168,9 +168,7 @@ else
     log "Patching runtime dependencies (no-op if up to date)..."
     "$VENV_DIR/bin/python3.12" -m pip install --no-cache-dir -q \
         runpod==1.6.1 boto3 botocore \
-        "huggingface-hub[cli]" hf_transfer \
-        "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
-        2>/dev/null || true
+        "huggingface_hub[cli]" hf_transfer || log "WARNING: Patch install failed (non-fatal)."
 fi
 
 # ---------------------------------------------------------------------------
@@ -180,8 +178,7 @@ if [ ! -f "$MODEL_DIR/config.json" ]; then
     log "Downloading model '$MODEL_REPO' to $MODEL_DIR ..."
     export HF_HUB_ENABLE_HF_TRANSFER=1
 
-    # Use snapshot_download API directly — avoids shebang path issues in the
-    # copied venv's huggingface-cli script.
+    # Use snapshot_download API directly — avoids shebang path issues with hf CLI.
     "$VENV_DIR/bin/python3.12" - <<PYEOF
 import os, sys
 from huggingface_hub import snapshot_download
@@ -194,9 +191,10 @@ try:
     print("[hf] Download complete.", flush=True)
 except Exception as e:
     print(f"[hf] Download failed: {e}", file=sys.stderr, flush=True)
-    sys.exit(1)
+    # NON-FATAL: let bootstrap continue so we can at least start the handler
+    print("[hf] Model download is non-fatal — will retry on next boot.", flush=True)
 PYEOF
-    log "Model download complete."
+    log "Model download step complete (may have failed — non-fatal)."
 else
     log "Model already present at $MODEL_DIR"
 fi
