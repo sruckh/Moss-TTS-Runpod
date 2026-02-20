@@ -10,6 +10,7 @@ echo "=== MOSS-TTS RunPod Bootstrap Starting ==="
 INSTALL_DIR="${INSTALL_DIR:-/runpod-volume/moss-tts}"
 SRC_DIR="$INSTALL_DIR/src"
 VENV_DIR="$INSTALL_DIR/venv"
+SETUP_MARKER="$VENV_DIR/.setup_complete"
 
 # 1. Ensure project root exists
 mkdir -p "$INSTALL_DIR"
@@ -25,33 +26,44 @@ if [ ! -d "src" ]; then
     git clone https://github.com/OpenMOSS/MOSS-TTS.git src
 fi
 
-# 4. Sync worker files from Docker image
+# 4. Sync worker files from Docker image (Always do this)
 echo "Updating worker files from image..."
 cp /opt/moss-tts/*.py src/
 
-# 5. Virtual Environment Management
-if [ ! -f "$VENV_DIR/bin/activate" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv "$VENV_DIR"
+# 5. Virtual Environment Management & Installation
+if [ ! -f "$SETUP_MARKER" ]; then
+    echo "=== First-time setup: initializing environment ==="
+    
+    if [ ! -d "$VENV_DIR" ]; then
+        echo "Creating virtual environment..."
+        python3.12 -m venv "$VENV_DIR"
+    fi
+    
+    source "$VENV_DIR/bin/activate"
+    cd src
+
+    echo "Step 1: Installing MOSS-TTS core..."
+    # Follow project instructions for CUDA 12.8
+    pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu128 -e .
+
+    if [ "${ENABLE_FLASH_ATTN:-false}" = "true" ]; then
+        echo "Step 2: Installing MOSS-TTS flash-attn..."
+        pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu128 -e ".[flash-attn]"
+    else
+        echo "Step 2: Skipping flash-attn (ENABLE_FLASH_ATTN=false)"
+    fi
+
+    echo "Step 3: Installing RunPod and S3 dependencies..."
+    pip install --no-cache-dir runpod==1.6.1 boto3 botocore huggingface-hub hf_transfer
+
+    touch "$SETUP_MARKER"
+    echo "=== Virtual environment setup complete ==="
+else
+    echo "Virtual environment already initialized; skipping reinstall"
+    source "$VENV_DIR/bin/activate"
 fi
-source "$VENV_DIR/bin/activate"
 
-# 6. User-Prescribed Installation Sequence
-# These steps follow the project's own instructions for CUDA 12.8
-cd src
-
-echo "Step 1: Installing MOSS-TTS core..."
-pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu128 -e .
-
-echo "Step 2: Installing MOSS-TTS flash-attn..."
-# This step handles the optional flash-attn requirement correctly
-pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu128 -e ".[flash-attn]"
-
-# 7. Worker and S3 Runtime Layer
-echo "Step 3: Installing RunPod and S3 dependencies..."
-pip install --no-cache-dir runpod==1.6.1 boto3 botocore huggingface-hub hf_transfer
-
-# 8. Model Weights Management
+# 6. Model Weights Management
 MODEL_REPO="${MODEL_REPO:-OpenMOSS-Team/MOSS-TTS}"
 MODEL_DIR="$INSTALL_DIR/models/$MODEL_REPO"
 
@@ -68,10 +80,10 @@ if [ ! -f "$MODEL_DIR/config.json" ]; then
     fi
 fi
 
-# 9. Clean up temp space
+# 7. Clean up temp space
 rm -rf "$TMPDIR"/* || true
 
-# 10. Start Handler
+# 8. Start Handler
 echo "Starting RunPod handler..."
 export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-}"
-exec python handler.py
+exec python "$SRC_DIR/handler.py"
