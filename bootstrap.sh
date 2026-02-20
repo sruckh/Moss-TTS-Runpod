@@ -30,8 +30,6 @@ MODEL_DIR="${MODEL_DIR:-$INSTALL_DIR/models/$MODEL_REPO}"
 MOSS_REPO="${MOSS_REPO:-https://github.com/OpenMOSS/MOSS-TTS.git}"
 MOSS_REF="${MOSS_REF:-main}"
 
-# Note: Removed complex /tmp staging approach - installing directly to volume.
-
 # ---------------------------------------------------------------------------
 # Logging: tee every line to log file AND stdout so RunPod console + file both
 # show the same output.
@@ -85,80 +83,71 @@ cp "$DOCKER_SRC/config.py"            "$SRC_DIR/"
 cp "$DOCKER_SRC/serverless_engine.py" "$SRC_DIR/"
 
 # ---------------------------------------------------------------------------
-# Python virtual environment — simple install like upstream.
-# Just 3 steps: clone, install, optionally flash-attn.
+# Python virtual environment — following IndexTTS2 proven pattern
 # ---------------------------------------------------------------------------
-INSTALL_SENTINEL="$VENV_DIR/.install_complete"
-
-if [ ! -f "$INSTALL_SENTINEL" ]; then
-    log "=== First-time setup: creating venv and installing packages ==="
+if [ ! -f "$VENV_DIR/bin/activate" ]; then
+    log "=== First-time setup: creating virtual environment ==="
 
     # Show available space
-    log "Available disk space:"
     df -h "$INSTALL_DIR" 2>/dev/null || true
 
-    # Step 1: Create venv directly on volume
     log "Creating venv at $VENV_DIR ..."
     rm -rf "$VENV_DIR"
     python3.12 -m venv "$VENV_DIR"
+    source "$VENV_DIR/bin/activate"
 
-    # Step 2: Install MOSS-TTS and all dependencies
-    log "Installing MOSS-TTS and all dependencies (~10-15 min)..."
-    (cd "$SRC_DIR" && "$VENV_DIR/bin/pip" install --no-cache-dir \
-        --extra-index-url https://download.pytorch.org/whl/cu128 \
-        -e .)
+    log "Installing uv package manager..."
+    pip install --no-cache-dir uv
+    export UV_LINK_MODE=copy
 
-    # Step 3: Optionally install flash-attn (non-fatal)
-    log "Installing flash-attn (optional, will use SDPA fallback if this fails)..."
-    "$VENV_DIR/bin/pip" install --no-cache-dir \
+    log "Installing PyTorch (CUDA 12.8)..."
+    uv pip install torch==2.9.1 torchaudio==2.9.1 \
+        --index-url https://download.pytorch.org/whl/cu128 || \
+        pip install --no-cache-dir torch==2.9.1 torchaudio==2.9.1 \
+            --index-url https://download.pytorch.org/whl/cu128
+
+    log "Installing flash-attn (prebuilt wheel)..."
+    pip install --no-cache-dir \
         "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
-        || log "WARNING: flash-attn install failed — SDPA fallback will be used."
+        || log "WARNING: flash-attn failed — SDPA fallback will be used."
 
-    # Install RunPod runtime
+    log "Installing MOSS-TTS..."
+    (cd "$SRC_DIR" && pip install --no-cache-dir -e .)
+
     log "Installing RunPod serverless runtime..."
-    "$VENV_DIR/bin/pip" install --no-cache-dir runpod==1.6.1 boto3 botocore || log "WARNING: RunPod runtime install failed."
+    pip install --no-cache-dir runpod==1.6.1 boto3 botocore
 
-    # Install HuggingFace CLI
     log "Installing HuggingFace CLI and hf_transfer..."
-    "$VENV_DIR/bin/pip" install --no-cache-dir huggingface_hub hf_transfer || log "WARNING: HuggingFace CLI install failed."
+    pip install --no-cache-dir huggingface_hub hf_transfer
 
-    # Write sentinel
-    touch "$INSTALL_SENTINEL"
-    log "=== First-time setup complete ==="
-
+    log "=== Virtual environment setup complete ==="
 else
-    log "Existing installation found at $VENV_DIR"
+    log "Activating existing virtual environment at $VENV_DIR"
+    source "$VENV_DIR/bin/activate"
 fi
 
 # ---------------------------------------------------------------------------
 # Download model weights (first boot or after MODEL_REPO change)
 # ---------------------------------------------------------------------------
 if [ ! -f "$MODEL_DIR/config.json" ]; then
-    log "Downloading model '$MODEL_REPO' to $MODEL_DIR ..."
-    export HF_HUB_ENABLE_HF_TRANSFER=1
+    log "Model not found. Downloading from HuggingFace..."
 
-    # Use snapshot_download API directly — avoids shebang path issues with hf CLI.
-    "$VENV_DIR/bin/python3.12" - <<PYEOF
-import os, sys
-from huggingface_hub import snapshot_download
-model_repo = os.environ.get("MODEL_REPO", "$MODEL_REPO")
-model_dir  = "$MODEL_DIR"
-token      = os.environ.get("HF_TOKEN") or None
-print(f"[hf] Downloading {model_repo} → {model_dir}", flush=True)
-try:
-    snapshot_download(model_repo, local_dir=model_dir, token=token)
-    print("[hf] Download complete.", flush=True)
-except Exception as e:
-    print(f"[hf] Download failed: {e}", file=sys.stderr, flush=True)
-    # NON-FATAL: let bootstrap continue so we can at least start the handler
-    print("[hf] Model download is non-fatal — will retry on next boot.", flush=True)
-PYEOF
-    log "Model download step complete (may have failed — non-fatal)."
+    if [ -n "$HF_TOKEN" ]; then
+        hf download "$MODEL_REPO" --local-dir="$MODEL_DIR" --token="$HF_TOKEN" || {
+            log "WARNING: Failed to download with token, trying without..."
+            hf download "$MODEL_REPO" --local-dir="$MODEL_DIR"
+        }
+    else
+        log "HF_TOKEN not set, downloading without authentication..."
+        hf download "$MODEL_REPO" --local-dir="$MODEL_DIR"
+    fi
+
+    log "Model download complete."
 else
     log "Model already present at $MODEL_DIR"
 fi
 
-# Sanity-check
+# Verify model
 if [ -f "$MODEL_DIR/config.json" ]; then
     log "✓ config.json found — model looks intact."
 else
@@ -168,9 +157,8 @@ fi
 
 # ---------------------------------------------------------------------------
 # Start the RunPod handler
-# Run the venv's Python directly (avoids activate script shebang path issues).
 # ---------------------------------------------------------------------------
 log "Starting RunPod handler..."
 export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-}"
 export HF_HUB_ENABLE_HF_TRANSFER=1
-exec "$VENV_DIR/bin/python3.12" "$SRC_DIR/handler.py"
+exec python "$SRC_DIR/handler.py"
