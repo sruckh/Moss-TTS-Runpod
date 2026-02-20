@@ -85,8 +85,15 @@ if [ ! -f "$SETUP_MARKER" ]; then
         -e . \
         runpod==1.6.1 \
         boto3 \
-        "huggingface-hub[cli,hf_xet]" \
+        botocore \
+        huggingface-hub \
         hf_transfer)
+
+    log "Verifying environment integrity"
+    uv pip check || {
+        log "WARNING: Dependency check failed. Attempting to fix missing dependencies..."
+        uv pip install botocore urllib3
+    }
 
     if [ "$ENABLE_FLASH_ATTN" = "true" ]; then
         log "Attempting optional flash-attn install"
