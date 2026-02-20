@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # MOSS-TTS RunPod bootstrap script.
-# First boot installs source, Python environment, and model weights onto /runpod-volume.
+# Hybrid Environment: Core worker deps in image, heavy ML deps in persistent venv.
 
 set -euo pipefail
 
@@ -43,7 +43,6 @@ log "Install directory: $INSTALL_DIR"
 log "Source directory: $SRC_DIR"
 log "Venv directory: $VENV_DIR"
 log "Model repo: $MODEL_REPO"
-log "Model directory: $MODEL_DIR"
 
 check_resources
 
@@ -62,9 +61,10 @@ cp "$DOCKER_SRC/handler.py" "$SRC_DIR/"
 cp "$DOCKER_SRC/config.py" "$SRC_DIR/"
 cp "$DOCKER_SRC/serverless_engine.py" "$SRC_DIR/"
 
+# Create venv with access to system site-packages (where worker core is pre-installed)
 if [ ! -f "$VENV_DIR/bin/activate" ]; then
-    log "Creating virtual environment"
-    uv venv "$VENV_DIR"
+    log "Creating virtual environment with system site-packages"
+    uv venv --system-site-packages "$VENV_DIR"
 fi
 
 source "$VENV_DIR/bin/activate"
@@ -72,54 +72,35 @@ export UV_LINK_MODE=copy
 export UV_CACHE_DIR="$INSTALL_DIR/.uv_cache"
 mkdir -p "$UV_CACHE_DIR"
 
-# Check if environment is actually functional
-is_env_broken() {
-    log "Verifying core dependencies..."
-    if ! python -c "import boto3; import botocore; import runpod; import torch; import transformers; print('Core imports successful')" 2>&1; then
-        return 0 # Broken
-    fi
-    return 1 # OK
+# Descriptive environment check
+verify_env() {
+    log "Verifying dependency availability..."
+    python -c "
+import sys
+try:
+    import runpod, boto3, botocore
+    print(f'Core worker deps OK: runpod={runpod.__version__}, boto3={boto3.__version__}')
+    import torch, transformers
+    print(f'ML deps OK: torch={torch.__version__}, transformers={transformers.__version__}')
+except ImportError as e:
+    print(f'CRITICAL: {e}', file=sys.stderr)
+    sys.exit(1)
+"
 }
 
 SETUP_MARKER="$VENV_DIR/.setup_complete"
-SHOULD_INSTALL=0
-
-if [ ! -f "$SETUP_MARKER" ]; then
-    log "Setup marker missing; triggering fresh install"
-    SHOULD_INSTALL=1
-elif is_env_broken; then
-    log "Virtual environment is corrupted or incomplete; wiping and recreating"
-    rm -rf "$VENV_DIR"
-    uv venv "$VENV_DIR"
-    source "$VENV_DIR/bin/activate"
-    SHOULD_INSTALL=1
-fi
-
-if [ "$SHOULD_INSTALL" -eq 1 ]; then
-    log "Installing MOSS-TTS dependencies with uv"
+if [ ! -f "$SETUP_MARKER" ] || ! verify_env &>/dev/null; then
+    log "Environment missing or corrupted; synchronizing dependencies..."
     check_resources
 
-    log "Installing MOSS-TTS and runtime extras"
-    # We use a single command to ensure atomic dependency resolution
+    # --refresh forces uv to verify all files exist on disk, fixing network volume corruption
     if ! (cd "$SRC_DIR" && uv pip install \
+        --refresh \
         --index-url https://download.pytorch.org/whl/cu128 \
         --extra-index-url https://pypi.org/simple \
         --index-strategy unsafe-best-match \
-        -e . \
-        runpod==1.6.1 \
-        boto3 \
-        botocore \
-        huggingface-hub \
-        hf_transfer); then
+        -e .); then
         log "ERROR: Installation failed"
-        exit 1
-    fi
-
-    log "Verifying environment integrity after install"
-    uv pip check || log "WARNING: uv pip check reported issues"
-    
-    if is_env_broken; then
-        log "ERROR: Environment still broken after installation"
         exit 1
     fi
 
@@ -128,11 +109,11 @@ if [ "$SHOULD_INSTALL" -eq 1 ]; then
         uv pip install flash-attn || log "flash-attn install failed; continuing without it"
     fi
 
-    check_resources
+    verify_env
     sync
     touch "$SETUP_MARKER"
 else
-    log "Virtual environment verified; proceeding to model check"
+    log "Virtual environment verified"
 fi
 
 export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-}"
@@ -153,11 +134,6 @@ if [ ! -f "$MODEL_DIR/config.json" ]; then
     fi
 else
     log "Model already present at $MODEL_DIR"
-fi
-
-if [ ! -f "$MODEL_DIR/config.json" ]; then
-    log "WARNING: config.json not found in $MODEL_DIR"
-    ls -la "$MODEL_DIR" || true
 fi
 
 log "Starting RunPod handler"
