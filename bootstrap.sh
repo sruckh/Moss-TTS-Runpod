@@ -30,12 +30,22 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
+# Resource diagnostics
+check_resources() {
+    log "--- Resource Status ---"
+    free -h || true
+    df -h / /runpod-volume || true
+    log "-----------------------"
+}
+
 log "Log file: $LOG_FILE"
 log "Install directory: $INSTALL_DIR"
 log "Source directory: $SRC_DIR"
 log "Venv directory: $VENV_DIR"
 log "Model repo: $MODEL_REPO"
 log "Model directory: $MODEL_DIR"
+
+check_resources
 
 log "Ensuring required directories exist"
 mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR" "$MODELS_ROOT"
@@ -48,38 +58,41 @@ else
 fi
 
 log "Copying worker files from Docker image"
-cp "$DOCKER_SRC/handler.py" "$SRC_DIR/"
-cp "$DOCKER_SRC/config.py" "$SRC_DIR/"
-cp "$DOCKER_SRC/serverless_engine.py" "$SRC_DIR/"
+cp "/opt/moss-tts/handler.py" "$SRC_DIR/"
+cp "/opt/moss-tts/config.py" "$SRC_DIR/"
+cp "/opt/moss-tts/serverless_engine.py" "$SRC_DIR/"
 
 if [ ! -f "$VENV_DIR/bin/activate" ]; then
     log "Creating virtual environment"
-    python -m venv "$VENV_DIR"
+    uv venv "$VENV_DIR"
 fi
 
 source "$VENV_DIR/bin/activate"
 export UV_LINK_MODE=copy
+export UV_CACHE_DIR="$INSTALL_DIR/.uv_cache"
+mkdir -p "$UV_CACHE_DIR"
 
 SETUP_MARKER="$VENV_DIR/.setup_complete"
 if [ ! -f "$SETUP_MARKER" ]; then
-    log "Installing bootstrap package manager"
-    pip install --no-cache-dir uv
+    log "Installing MOSS-TTS dependencies with uv"
+    check_resources
 
-    log "Installing MOSS-TTS from source with CUDA 12.8 extra index"
-    (cd "$SRC_DIR" && pip install --extra-index-url https://download.pytorch.org/whl/cu128 -e .)
-
-    log "Installing serverless runtime extras"
-    pip install --no-cache-dir \
+    log "Installing MOSS-TTS and runtime extras"
+    (cd "$SRC_DIR" && uv pip install \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url https://pypi.org/simple \
+        -e . \
         runpod==1.6.1 \
         boto3 \
         "huggingface-hub[cli,hf_xet]" \
-        hf_transfer
+        hf_transfer)
 
     if [ "$ENABLE_FLASH_ATTN" = "true" ]; then
         log "Attempting optional flash-attn install"
-        pip install --no-cache-dir flash-attn || log "flash-attn install failed; continuing without it"
+        uv pip install flash-attn || log "flash-attn install failed; continuing without it"
     fi
 
+    check_resources
     touch "$SETUP_MARKER"
 else
     log "Virtual environment already initialized; skipping package reinstall"
