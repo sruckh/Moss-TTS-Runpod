@@ -1,28 +1,28 @@
 #!/bin/bash
-
-# MOSS-TTS RunPod Serverless Bootstrap Script
+# MOSS-TTS RunPod Serverless Bootstrap
 #
 # First boot (~20-30 min):
-#   - clones MOSS-TTS source + initialises git submodule (moss_audio_tokenizer)
-#   - installs all Python packages to LOCAL disk (/tmp) to avoid NFS failures
-#   - copies completed venv from /tmp to the network volume (one-time bulk copy)
-#   - downloads model weights from HuggingFace
+#   - Clones MOSS-TTS source + initialises moss_audio_tokenizer submodule
+#   - Installs all Python packages via uv in copy mode (NFS-safe)
+#   - Downloads model weights from HuggingFace
 #
 # Subsequent boots (~seconds):
-#   - copies latest handler files from Docker image
-#   - starts the RunPod handler using the persisted venv
+#   - Copies latest handler files from Docker image
+#   - Skips install (sentinel guards against partial installs)
+#   - Starts the RunPod handler
 
-set -e  # Exit on any error
+set -e
 
 echo "=== MOSS-TTS RunPod Bootstrap Starting ==="
 
 # ---------------------------------------------------------------------------
-# Configuration (override via environment variables)
+# Configuration
 # ---------------------------------------------------------------------------
 INSTALL_DIR="${INSTALL_DIR:-/runpod-volume/moss-tts}"
 DOCKER_SRC="/opt/moss-tts"
 SRC_DIR="$INSTALL_DIR/src"
 VENV_DIR="$INSTALL_DIR/venv"
+SENTINEL="$VENV_DIR/.install_complete"
 AUDIO_VOICES_DIR="${AUDIO_VOICES_DIR:-$INSTALL_DIR/audio_voices}"
 OUTPUT_AUDIO_DIR="${OUTPUT_AUDIO_DIR:-$INSTALL_DIR/output_audio}"
 MODEL_REPO="${MODEL_REPO:-OpenMOSS-Team/MOSS-TTS}"
@@ -31,127 +31,145 @@ MOSS_REPO="${MOSS_REPO:-https://github.com/OpenMOSS/MOSS-TTS.git}"
 MOSS_REF="${MOSS_REF:-main}"
 
 # ---------------------------------------------------------------------------
-# Logging: tee every line to log file AND stdout so RunPod console + file both
-# show the same output.
+# Logging
 # ---------------------------------------------------------------------------
 LOG_FILE="$INSTALL_DIR/bootstrap.log"
 mkdir -p "$INSTALL_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 
-log "Log file: $LOG_FILE"
 log "Install dir: $INSTALL_DIR"
 log "Source dir:  $SRC_DIR"
 log "Venv dir:    $VENV_DIR"
+log "Sentinel:    $SENTINEL"
 log "Model repo:  $MODEL_REPO"
-log "Model dir:   $MODEL_DIR"
-log "MOSS ref:    $MOSS_REF"
 
 # ---------------------------------------------------------------------------
-# Ensure required directories exist early
+# Ensure required directories exist
 # ---------------------------------------------------------------------------
-log "Creating required directories..."
 mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR" "$MODEL_DIR"
 
 # ---------------------------------------------------------------------------
 # Clone MOSS-TTS source (first boot only)
-# The repo contains a git submodule (moss_audio_tokenizer) that MUST be
-# initialised — without it the audio tokenizer module is empty and all
-# imports fail.
 # ---------------------------------------------------------------------------
 if [ ! -d "$SRC_DIR/.git" ]; then
-    log "Cloning MOSS-TTS source (ref: $MOSS_REF)..."
+    log "Cloning MOSS-TTS (ref: $MOSS_REF)..."
     GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch "$MOSS_REF" "$MOSS_REPO" "$SRC_DIR"
 
     log "Initialising git submodule (moss_audio_tokenizer)..."
     git -C "$SRC_DIR" submodule update --init --recursive
-    log "Source cloned and submodules initialised."
+    log "Clone complete."
 else
     log "MOSS-TTS source already present at $SRC_DIR"
 fi
 
 # ---------------------------------------------------------------------------
-# Always copy latest handler files from Docker image so that code updates
-# take effect on every boot without needing to rebuild the network volume.
+# Always copy latest handler files from Docker image so code updates
+# take effect on every boot without needing to wipe the network volume.
 # ---------------------------------------------------------------------------
 log "Copying handler files from Docker image..."
-cp "$DOCKER_SRC/handler.py"           "$SRC_DIR/"
-cp "$DOCKER_SRC/config.py"            "$SRC_DIR/"
-cp "$DOCKER_SRC/serverless_engine.py" "$SRC_DIR/"
+cp "$DOCKER_SRC/handler.py" "$DOCKER_SRC/config.py" "$DOCKER_SRC/serverless_engine.py" "$SRC_DIR/"
 
 # ---------------------------------------------------------------------------
-# Python virtual environment — following IndexTTS2 proven pattern
+# Python virtual environment
+#
+# SENTINEL: $VENV_DIR/.install_complete
+# Written only after ALL package installs succeed. Using bin/activate as
+# sentinel is wrong: it is created at venv init time, before any packages
+# are installed. A failed mid-install leaves bin/activate present, so the
+# next boot skips install and the handler crashes in a restart loop.
+#
+# INSTALL TOOL: uv with UV_LINK_MODE=copy
+# In copy mode uv writes files directly to site-packages without the
+# temp-file-rename atomic write that pip uses. This avoids the NFS
+# attribute-cache race that causes pip to fail on RunPod network volumes.
+# UV_CACHE_DIR=/tmp keeps the download cache on local SSD.
+#
+# MOSS-TTS: installed with --no-deps to skip gradio and the full UI
+# dependency tree. Only the inference deps from pyproject.toml are
+# installed explicitly below.
 # ---------------------------------------------------------------------------
-if [ ! -f "$VENV_DIR/bin/activate" ]; then
-    log "=== First-time setup: creating virtual environment ==="
+if [ ! -f "$SENTINEL" ]; then
+    log "=== First-time setup: installing Python environment ==="
+    df -h "$INSTALL_DIR" || true
 
-    # Show available space
-    df -h "$INSTALL_DIR" 2>/dev/null || true
-
-    log "Creating venv at $VENV_DIR ..."
-    rm -rf "$VENV_DIR"
-    python3.12 -m venv "$VENV_DIR"
+    # --clear resets any partial venv from a prior failed attempt without
+    # needing rm -rf (which can fail on NFS with "Directory not empty").
+    log "Creating virtual environment (--clear resets any partial prior attempt)..."
+    python3.12 -m venv --clear "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
 
-    log "Installing uv package manager..."
-    pip install --no-cache-dir uv
+    # uv is pre-installed in the Docker image at the system level.
+    # Keep download cache on local disk; use copy mode for NFS safety.
     export UV_LINK_MODE=copy
+    export UV_CACHE_DIR="/tmp/uv-cache"
 
-    log "Installing PyTorch (CUDA 12.8)..."
-    uv pip install torch==2.9.1 torchaudio==2.9.1 \
-        --index-url https://download.pytorch.org/whl/cu128 || \
-        pip install --no-cache-dir torch==2.9.1 torchaudio==2.9.1 \
-            --index-url https://download.pytorch.org/whl/cu128
+    log "Installing PyTorch + torchaudio (CUDA 12.8)..."
+    uv pip install \
+        torch==2.9.1 torchaudio==2.9.1 \
+        --index-url https://download.pytorch.org/whl/cu128
 
-    log "Installing flash-attn (prebuilt wheel)..."
-    pip install --no-cache-dir \
+    log "Installing flash-attn prebuilt wheel (non-fatal)..."
+    uv pip install \
         "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
         || log "WARNING: flash-attn failed — SDPA fallback will be used."
 
-    log "Installing MOSS-TTS..."
-    (cd "$SRC_DIR" && pip install --no-cache-dir -e .)
+    log "Installing MOSS-TTS source package (--no-deps skips gradio / UI packages)..."
+    uv pip install --no-deps -e "$SRC_DIR"
+
+    log "Installing MOSS-TTS inference dependencies..."
+    uv pip install \
+        "torchcodec==0.8.1" \
+        "transformers==5.0.0" \
+        "safetensors==0.6.2" \
+        "numpy==2.1.0" \
+        "orjson==3.11.4" \
+        "tqdm==4.67.1" \
+        "PyYAML==6.0.3" \
+        "einops==0.8.1" \
+        "scipy==1.16.2" \
+        "librosa==0.11.0" \
+        "tiktoken==0.12.0" \
+        psutil packaging \
+        --extra-index-url https://download.pytorch.org/whl/cu128
 
     log "Installing RunPod serverless runtime..."
-    pip install --no-cache-dir runpod==1.6.1 boto3 botocore
+    uv pip install runpod==1.6.1 boto3 botocore huggingface_hub hf_transfer
 
-    log "Installing HuggingFace CLI and hf_transfer..."
-    pip install --no-cache-dir huggingface_hub hf_transfer
-
-    log "=== Virtual environment setup complete ==="
+    # Sentinel written ONLY after every install above succeeds.
+    # If anything above exits non-zero, set -e kills bootstrap before we
+    # reach this line, the sentinel is never written, and the next boot
+    # starts fresh (--clear wipes the partial venv).
+    touch "$SENTINEL"
+    log "=== Python environment install complete ==="
 else
-    log "Activating existing virtual environment at $VENV_DIR"
-    source "$VENV_DIR/bin/activate"
+    log "Virtual environment ready (sentinel found). Skipping install."
 fi
 
 # ---------------------------------------------------------------------------
-# Download model weights (first boot or after MODEL_REPO change)
+# Download model weights (first boot only)
 # ---------------------------------------------------------------------------
 if [ ! -f "$MODEL_DIR/config.json" ]; then
-    log "Model not found. Downloading from HuggingFace..."
-
-    if [ -n "$HF_TOKEN" ]; then
-        hf download "$MODEL_REPO" --local-dir="$MODEL_DIR" --token="$HF_TOKEN" || {
-            log "WARNING: Failed to download with token, trying without..."
-            hf download "$MODEL_REPO" --local-dir="$MODEL_DIR"
-        }
-    else
-        log "HF_TOKEN not set, downloading without authentication..."
-        hf download "$MODEL_REPO" --local-dir="$MODEL_DIR"
-    fi
-
-    log "Model download complete."
+    log "Downloading model weights ($MODEL_REPO)..."
+    HF_HUB_ENABLE_HF_TRANSFER=1 "$VENV_DIR/bin/python3.12" - <<PYEOF
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="$MODEL_REPO",
+    local_dir="$MODEL_DIR",
+    token=os.environ.get("HF_TOKEN") or None,
+)
+print("Model download complete.")
+PYEOF
 else
     log "Model already present at $MODEL_DIR"
 fi
 
-# Verify model
 if [ -f "$MODEL_DIR/config.json" ]; then
     log "✓ config.json found — model looks intact."
 else
-    log "WARNING: config.json not found at $MODEL_DIR after download."
+    log "WARNING: config.json not found at $MODEL_DIR"
     ls -la "$MODEL_DIR" || true
 fi
 
@@ -159,6 +177,6 @@ fi
 # Start the RunPod handler
 # ---------------------------------------------------------------------------
 log "Starting RunPod handler..."
-export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-}"
+export PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export HF_HUB_ENABLE_HF_TRANSFER=1
-exec python "$SRC_DIR/handler.py"
+exec "$VENV_DIR/bin/python3.12" "$SRC_DIR/handler.py"
