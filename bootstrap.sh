@@ -118,9 +118,12 @@ if [ ! -f "$SENTINEL" ]; then
     log "Installing MOSS-TTS source package (--no-deps skips gradio / UI packages)..."
     uv pip install --no-deps -e "$SRC_DIR"
 
-    log "Installing MOSS-TTS inference dependencies..."
+    log "Installing torchcodec (PyTorch index only)..."
+    uv pip install "torchcodec==0.8.1" \
+        --index-url https://download.pytorch.org/whl/cu128
+
+    log "Installing MOSS-TTS inference dependencies (PyPI)..."
     uv pip install \
-        "torchcodec==0.8.1" \
         "transformers==5.0.0" \
         "safetensors==0.6.2" \
         "numpy==2.1.0" \
@@ -131,8 +134,7 @@ if [ ! -f "$SENTINEL" ]; then
         "scipy==1.16.2" \
         "librosa==0.11.0" \
         "tiktoken==0.12.0" \
-        psutil packaging \
-        --extra-index-url https://download.pytorch.org/whl/cu128
+        psutil packaging
 
     log "Installing RunPod serverless runtime..."
     uv pip install runpod==1.6.1 boto3 botocore huggingface_hub hf_transfer
