@@ -94,10 +94,17 @@ if [ ! -f "$SENTINEL" ]; then
     log "=== First-time setup: installing Python environment ==="
     df -h "$INSTALL_DIR" || true
 
-    # --clear resets any partial venv from a prior failed attempt without
-    # needing rm -rf (which can fail on NFS with "Directory not empty").
-    log "Creating virtual environment (--clear resets any partial prior attempt)..."
-    python3.12 -m venv --clear "$VENV_DIR"
+    # Create venv only if it does not already exist.
+    # Do NOT try to clear/wipe a partial venv: rm -rf and venv --clear
+    # both fail on NFS with "Directory not empty". Instead, reuse the
+    # existing venv — uv is idempotent and skips already-installed
+    # packages, so a retry picks up exactly where it left off.
+    if [ ! -f "$VENV_DIR/bin/python3.12" ]; then
+        log "Creating virtual environment..."
+        python3.12 -m venv "$VENV_DIR"
+    else
+        log "Resuming install on existing partial venv..."
+    fi
     source "$VENV_DIR/bin/activate"
 
     # uv is pre-installed in the Docker image at the system level.
