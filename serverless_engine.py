@@ -141,19 +141,41 @@ class MossTTSInference:
         self._torch_dtype = None
         self._sample_rate = config.DEFAULT_SAMPLE_RATE
 
-    def _has_local_model(self) -> bool:
-        if not self.model_dir.exists():
+    @staticmethod
+    def _is_complete_model_dir(model_path: Path) -> bool:
+        if not model_path.exists():
             return False
-        has_config = (self.model_dir / "config.json").exists()
-        has_weights = (self.model_dir / "model.safetensors").exists() or (
-            self.model_dir / "model.safetensors.index.json"
+        has_config = (model_path / "config.json").exists()
+        has_weights = (model_path / "model.safetensors").exists() or (
+            model_path / "model.safetensors.index.json"
         ).exists()
         return has_config and has_weights
 
-    def _resolve_model_source(self) -> Tuple[str, bool]:
-        if self._has_local_model():
-            return str(self.model_dir), True
-        return self.model_repo, False
+    def _find_runpod_cached_snapshot(self) -> Optional[Path]:
+        cache_root = config.config.RUNPOD_HF_CACHE_DIR
+        snapshots_dir = cache_root / f"models--{self.model_repo.replace('/', '--')}" / "snapshots"
+        if not snapshots_dir.exists():
+            return None
+
+        if self.model_revision:
+            pinned = snapshots_dir / self.model_revision
+            if self._is_complete_model_dir(pinned):
+                return pinned
+
+        candidates = [p for p in snapshots_dir.iterdir() if p.is_dir()]
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for snapshot in candidates:
+            if self._is_complete_model_dir(snapshot):
+                return snapshot
+        return None
+
+    def _resolve_model_source(self) -> Tuple[str, bool, str]:
+        runpod_snapshot = self._find_runpod_cached_snapshot()
+        if runpod_snapshot is not None:
+            return str(runpod_snapshot), True, "runpod-cache"
+        if self._is_complete_model_dir(self.model_dir):
+            return str(self.model_dir), True, "local-volume"
+        return self.model_repo, False, "huggingface-hub"
 
     def _resolve_dtype(self) -> torch.dtype:
         if self.dtype in {"auto", ""}:
@@ -204,10 +226,15 @@ class MossTTSInference:
 
             self._torch_device = torch.device("cuda" if requested_device == "cuda" and cuda_available else "cpu")
             self._torch_dtype = self._resolve_dtype()
-            model_source, local_files_only = self._resolve_model_source()
+            model_source, local_files_only, source_kind = self._resolve_model_source()
 
             resolved_attn = self._resolve_attn_implementation()
-            log.info("Loading MOSS-TTS model from %s (local_only=%s)", model_source, local_files_only)
+            log.info(
+                "Loading MOSS-TTS model from %s (source=%s, local_only=%s)",
+                model_source,
+                source_kind,
+                local_files_only,
+            )
             log.info("Device=%s dtype=%s attn=%s", self._torch_device, self._torch_dtype, resolved_attn)
 
             processor_kwargs: Dict[str, Any] = {

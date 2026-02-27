@@ -25,6 +25,9 @@ DEFAULT_MODEL_REPO = "OpenMOSS-Team/MOSS-TTS"
 MODEL_REPO = os.environ.get("MODEL_REPO", DEFAULT_MODEL_REPO)
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", str(MODELS_ROOT / MODEL_REPO)))
 MODEL_REVISION = os.environ.get("MODEL_REVISION")
+RUNPOD_HF_CACHE_DIR = Path(
+    os.environ.get("RUNPOD_HF_CACHE_DIR", "/runpod-volume/huggingface-cache/hub")
+)
 
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm", ".aac", ".opus"}
 DEFAULT_SAMPLE_RATE = 24000
@@ -71,6 +74,7 @@ class Config:
         self.MODEL_REPO = MODEL_REPO
         self.MODEL_DIR = MODEL_DIR
         self.MODEL_REVISION = MODEL_REVISION
+        self.RUNPOD_HF_CACHE_DIR = RUNPOD_HF_CACHE_DIR
 
         self.device = DEVICE
         self.default_dtype = DEFAULT_DTYPE
@@ -117,6 +121,7 @@ class Config:
         if self.MODEL_REVISION:
             log.info("Model revision: %s", self.MODEL_REVISION)
         log.info("Model dir: %s", self.MODEL_DIR)
+        log.info("RunPod HF cache dir: %s", self.RUNPOD_HF_CACHE_DIR)
         log.info("Device: %s", self.device)
 
     def validate(self) -> bool:

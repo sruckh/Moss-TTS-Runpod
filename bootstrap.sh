@@ -34,6 +34,7 @@ MOSS_REF="${MOSS_REF:-main}"
 BOOTSTRAP_DOWNLOAD_MODEL="${BOOTSTRAP_DOWNLOAD_MODEL:-false}"
 HF_HOME="${HF_HOME:-/tmp/huggingface-cache}"
 HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
+RUNPOD_HF_CACHE_DIR="${RUNPOD_HF_CACHE_DIR:-/runpod-volume/huggingface-cache/hub}"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -66,6 +67,7 @@ if [ -n "$MODEL_REVISION" ]; then
 fi
 log "Bootstrap download model: $BOOTSTRAP_DOWNLOAD_MODEL"
 log "Docker source: $DOCKER_SRC"
+log "RunPod HF cache dir: $RUNPOD_HF_CACHE_DIR"
 if [[ "$HF_HUB_CACHE" == /runpod-volume/* ]]; then
     log "WARNING: HF_HUB_CACHE points to network volume ($HF_HUB_CACHE). Using /tmp cache to avoid NFS lock issues."
     HF_HOME="/tmp/huggingface-cache"
@@ -75,6 +77,11 @@ mkdir -p "$HF_HUB_CACHE"
 export HF_HOME HF_HUB_CACHE
 log "HF_HOME:     $HF_HOME"
 log "HF_HUB_CACHE:$HF_HUB_CACHE"
+if [ -d "$RUNPOD_HF_CACHE_DIR" ]; then
+    log "RunPod model cache is mounted and available."
+else
+    log "RunPod model cache directory not found at startup."
+fi
 
 for required_file in handler.py config.py serverless_engine.py; do
     if [ ! -f "$DOCKER_SRC/$required_file" ]; then
