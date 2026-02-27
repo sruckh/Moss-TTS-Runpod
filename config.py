@@ -42,6 +42,8 @@ DEVICE = "cuda" if os.environ.get("DEVICE") != "cpu" else "cpu"
 DEFAULT_DTYPE = os.environ.get("DEFAULT_DTYPE", "auto")
 DEFAULT_ATTN_IMPLEMENTATION = os.environ.get("DEFAULT_ATTN_IMPLEMENTATION", "auto")
 DEFAULT_MAX_NEW_TOKENS = int(os.environ.get("DEFAULT_MAX_NEW_TOKENS", "4096"))
+OOM_TOKEN_CAP_24GB = int(os.environ.get("OOM_TOKEN_CAP_24GB", "2048"))
+OOM_RETRY_MAX_NEW_TOKENS = int(os.environ.get("OOM_RETRY_MAX_NEW_TOKENS", "1024"))
 
 DEFAULT_AUDIO_TEMPERATURE = float(os.environ.get("DEFAULT_AUDIO_TEMPERATURE", "1.7"))
 DEFAULT_AUDIO_TOP_P = float(os.environ.get("DEFAULT_AUDIO_TOP_P", "0.8"))
@@ -89,6 +91,8 @@ class Config:
         self.default_dtype = DEFAULT_DTYPE
         self.default_attn_implementation = DEFAULT_ATTN_IMPLEMENTATION
         self.default_max_new_tokens = DEFAULT_MAX_NEW_TOKENS
+        self.oom_token_cap_24gb = OOM_TOKEN_CAP_24GB
+        self.oom_retry_max_new_tokens = OOM_RETRY_MAX_NEW_TOKENS
 
         self.default_audio_temperature = DEFAULT_AUDIO_TEMPERATURE
         self.default_audio_top_p = DEFAULT_AUDIO_TOP_P

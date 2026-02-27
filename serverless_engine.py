@@ -27,6 +27,7 @@ torch.backends.cuda.enable_math_sdp(True)
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _MODEL_INIT_LOCK = threading.Lock()
+_INFER_LOCK = threading.Lock()
 
 
 def _is_local_only_miss(exc: Exception) -> bool:
@@ -147,6 +148,8 @@ class MossTTSInference:
         self.audio_tokenizer_repo = config.config.AUDIO_TOKENIZER_REPO
         self.audio_tokenizer_dir = config.config.AUDIO_TOKENIZER_DIR
         self.audio_tokenizer_revision = config.config.AUDIO_TOKENIZER_REVISION
+        self.oom_token_cap_24gb = int(config.config.oom_token_cap_24gb)
+        self.oom_retry_max_new_tokens = int(config.config.oom_retry_max_new_tokens)
 
         self._model = None
         self._processor = None
@@ -325,6 +328,28 @@ class MossTTSInference:
             self._sample_rate = int(getattr(self._processor.model_config, "sampling_rate", config.DEFAULT_SAMPLE_RATE))
             log.info("Model loaded; sample_rate=%s", self._sample_rate)
 
+    @staticmethod
+    def _is_cuda_oom(exc: Exception) -> bool:
+        return "out of memory" in str(exc).lower()
+
+    def _cap_max_new_tokens_for_vram(self, requested: int) -> int:
+        capped = int(requested)
+        if self._torch_device is None or self._torch_device.type != "cuda":
+            return capped
+        try:
+            total_gb = torch.cuda.get_device_properties(self._torch_device).total_memory / (1024 ** 3)
+        except Exception:
+            return capped
+        if total_gb <= 24.5 and capped > self.oom_token_cap_24gb:
+            log.warning(
+                "Capping max_new_tokens from %s to %s for %.1fGB GPU VRAM.",
+                capped,
+                self.oom_token_cap_24gb,
+                total_gb,
+            )
+            return self.oom_token_cap_24gb
+        return capped
+
     def _resolve_voice_path_or_url(self, value: Optional[str]) -> Optional[str]:
         if not value:
             return None
@@ -416,16 +441,36 @@ class MossTTSInference:
         input_ids = batch["input_ids"].to(self._torch_device)
         attention_mask = batch["attention_mask"].to(self._torch_device)
 
-        with torch.no_grad():
-            outputs = self._model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=int(max_new_tokens),
-                audio_temperature=float(audio_temperature),
-                audio_top_p=float(audio_top_p),
-                audio_top_k=int(audio_top_k),
-                audio_repetition_penalty=float(audio_repetition_penalty),
-            )
+        max_new_tokens = self._cap_max_new_tokens_for_vram(max_new_tokens)
+        generate_kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "max_new_tokens": int(max_new_tokens),
+            "audio_temperature": float(audio_temperature),
+            "audio_top_p": float(audio_top_p),
+            "audio_top_k": int(audio_top_k),
+            "audio_repetition_penalty": float(audio_repetition_penalty),
+        }
+        try:
+            with torch.inference_mode():
+                outputs = self._model.generate(**generate_kwargs)
+        except Exception as exc:
+            if self._is_cuda_oom(exc) and self._torch_device is not None and self._torch_device.type == "cuda":
+                retry_tokens = max(128, min(int(max_new_tokens), self.oom_retry_max_new_tokens))
+                if retry_tokens < int(max_new_tokens):
+                    log.warning(
+                        "CUDA OOM at max_new_tokens=%s. Retrying once with max_new_tokens=%s.",
+                        max_new_tokens,
+                        retry_tokens,
+                    )
+                    torch.cuda.empty_cache()
+                    generate_kwargs["max_new_tokens"] = retry_tokens
+                    with torch.inference_mode():
+                        outputs = self._model.generate(**generate_kwargs)
+                else:
+                    raise
+            else:
+                raise
 
         messages = self._processor.decode(outputs)
         if not messages:
@@ -433,12 +478,16 @@ class MossTTSInference:
 
         audio = messages[0].audio_codes_list[0]
         if isinstance(audio, torch.Tensor):
-            audio_tensor = audio.detach().float().to(self._torch_device)
+            audio_tensor = audio.detach().float().cpu()
         else:
-            audio_tensor = torch.as_tensor(audio, dtype=torch.float32, device=self._torch_device)
+            audio_tensor = torch.as_tensor(audio, dtype=torch.float32)
 
         if audio_tensor.dim() > 1:
             audio_tensor = audio_tensor.reshape(-1)
+
+        del batch, input_ids, attention_mask, outputs, messages
+        if self._torch_device is not None and self._torch_device.type == "cuda":
+            torch.cuda.empty_cache()
 
         return audio_tensor, self._sample_rate
 
@@ -459,49 +508,50 @@ class MossTTSInference:
         enable_crossfade: bool = True,
         crossfade_ms: int = 140,
     ) -> Tuple[torch.Tensor, int]:
-        self._load_model()
+        with _INFER_LOCK:
+            self._load_model()
 
-        resolved_reference = self._resolve_voice_path_or_url(reference_audio)
-        resolved_prefix = self._resolve_voice_path_or_url(prefix_audio)
+            resolved_reference = self._resolve_voice_path_or_url(reference_audio)
+            resolved_prefix = self._resolve_voice_path_or_url(prefix_audio)
 
-        if enable_chunking and mode == "generation" and len(text) > max_chars_per_chunk:
-            chunks = chunk_text(text, max_chars=max_chars_per_chunk)
-            if not chunks:
-                raise ValueError("Text is empty after normalization")
+            if enable_chunking and mode == "generation" and len(text) > max_chars_per_chunk:
+                chunks = chunk_text(text, max_chars=max_chars_per_chunk)
+                if not chunks:
+                    raise ValueError("Text is empty after normalization")
 
-            generated: List[torch.Tensor] = []
-            for idx, chunk in enumerate(chunks, start=1):
-                log.info("Generating chunk %s/%s", idx, len(chunks))
-                chunk_audio, _ = self._generate_single(
-                    text=chunk,
-                    mode=mode,
-                    reference_audio=resolved_reference,
-                    prefix_audio=resolved_prefix,
-                    expected_tokens=expected_tokens,
-                    max_new_tokens=max_new_tokens,
-                    audio_temperature=audio_temperature,
-                    audio_top_p=audio_top_p,
-                    audio_top_k=audio_top_k,
-                    audio_repetition_penalty=audio_repetition_penalty,
-                )
-                generated.append(chunk_audio)
+                generated: List[torch.Tensor] = []
+                for idx, chunk in enumerate(chunks, start=1):
+                    log.info("Generating chunk %s/%s", idx, len(chunks))
+                    chunk_audio, _ = self._generate_single(
+                        text=chunk,
+                        mode=mode,
+                        reference_audio=resolved_reference,
+                        prefix_audio=resolved_prefix,
+                        expected_tokens=expected_tokens,
+                        max_new_tokens=max_new_tokens,
+                        audio_temperature=audio_temperature,
+                        audio_top_p=audio_top_p,
+                        audio_top_k=audio_top_k,
+                        audio_repetition_penalty=audio_repetition_penalty,
+                    )
+                    generated.append(chunk_audio)
 
-            if enable_crossfade and len(generated) > 1:
-                return crossfade_chunks(generated, crossfade_ms=crossfade_ms, sample_rate=self._sample_rate), self._sample_rate
-            return torch.cat(generated, dim=-1), self._sample_rate
+                if enable_crossfade and len(generated) > 1:
+                    return crossfade_chunks(generated, crossfade_ms=crossfade_ms, sample_rate=self._sample_rate), self._sample_rate
+                return torch.cat(generated, dim=-1), self._sample_rate
 
-        return self._generate_single(
-            text=text,
-            mode=mode,
-            reference_audio=resolved_reference,
-            prefix_audio=resolved_prefix,
-            expected_tokens=expected_tokens,
-            max_new_tokens=max_new_tokens,
-            audio_temperature=audio_temperature,
-            audio_top_p=audio_top_p,
-            audio_top_k=audio_top_k,
-            audio_repetition_penalty=audio_repetition_penalty,
-        )
+            return self._generate_single(
+                text=text,
+                mode=mode,
+                reference_audio=resolved_reference,
+                prefix_audio=resolved_prefix,
+                expected_tokens=expected_tokens,
+                max_new_tokens=max_new_tokens,
+                audio_temperature=audio_temperature,
+                audio_top_p=audio_top_p,
+                audio_top_k=audio_top_k,
+                audio_repetition_penalty=audio_repetition_penalty,
+            )
 
     def generate_audio_stream_decoded(
         self,

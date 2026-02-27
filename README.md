@@ -107,6 +107,8 @@ docker push your-registry/moss-tts:latest
 | `RUNPOD_INIT_TIMEOUT` | Worker init timeout in seconds (important for long first boot) | `2400` |
 | `BOOTSTRAP_DOWNLOAD_MODEL` | Download model during bootstrap (`true`) or lazily on first request (`false`) | `false` |
 | `BOOTSTRAP_DOWNLOAD_AUDIO_TOKENIZER` | Download audio tokenizer during bootstrap to support offline/local-only loads | `true` |
+| `OOM_TOKEN_CAP_24GB` | Automatic `max_new_tokens` cap when GPU VRAM is ~24GB | `2048` |
+| `OOM_RETRY_MAX_NEW_TOKENS` | One-shot retry token limit after CUDA OOM | `1024` |
 | `AUDIO_VOICES_DIR` | Directory for reference audio files | `/runpod-volume/moss-tts/audio_voices` |
 | `OUTPUT_AUDIO_DIR` | Directory for temporary output | `/runpod-volume/moss-tts/output_audio` |
 | `MODEL_DIR` | Model weights location | `/runpod-volume/moss-tts/models/OpenMOSS-Team/MOSS-TTS` |
