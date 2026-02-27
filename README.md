@@ -100,13 +100,17 @@ docker push your-registry/moss-tts:latest
 | `HF_TOKEN` | HuggingFace authentication token | - |
 | `MODEL_REPO` | HuggingFace model repository | `OpenMOSS-Team/MOSS-TTS` |
 | `MODEL_REVISION` | Optional pinned HuggingFace revision/commit SHA | - |
+| `AUDIO_TOKENIZER_REPO` | HuggingFace audio tokenizer repository used by MOSS-TTS processor | `OpenMOSS-Team/MOSS-Audio-Tokenizer` |
+| `AUDIO_TOKENIZER_REVISION` | Optional pinned revision/commit SHA for audio tokenizer repo | - |
 | `RUNPOD_HF_CACHE_DIR` | RunPod Cached Models mount path (read-only source for fast local loads) | `/runpod-volume/huggingface-cache/hub` |
 | `MOSS_REF` | Git branch/commit for MOSS-TTS source | `main` |
 | `RUNPOD_INIT_TIMEOUT` | Worker init timeout in seconds (important for long first boot) | `2400` |
 | `BOOTSTRAP_DOWNLOAD_MODEL` | Download model during bootstrap (`true`) or lazily on first request (`false`) | `false` |
+| `BOOTSTRAP_DOWNLOAD_AUDIO_TOKENIZER` | Download audio tokenizer during bootstrap to support offline/local-only loads | `true` |
 | `AUDIO_VOICES_DIR` | Directory for reference audio files | `/runpod-volume/moss-tts/audio_voices` |
 | `OUTPUT_AUDIO_DIR` | Directory for temporary output | `/runpod-volume/moss-tts/output_audio` |
 | `MODEL_DIR` | Model weights location | `/runpod-volume/moss-tts/models/OpenMOSS-Team/MOSS-TTS` |
+| `AUDIO_TOKENIZER_DIR` | Audio tokenizer weights location | `/runpod-volume/moss-tts/models/OpenMOSS-Team/MOSS-Audio-Tokenizer` |
 
 #### Optional Decoding Defaults
 

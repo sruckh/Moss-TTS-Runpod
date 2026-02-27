@@ -29,9 +29,13 @@ OUTPUT_AUDIO_DIR="${OUTPUT_AUDIO_DIR:-}"
 MODEL_REPO="${MODEL_REPO:-OpenMOSS-Team/MOSS-TTS}"
 MODEL_DIR="${MODEL_DIR:-}"
 MODEL_REVISION="${MODEL_REVISION:-}"
+AUDIO_TOKENIZER_REPO="${AUDIO_TOKENIZER_REPO:-OpenMOSS-Team/MOSS-Audio-Tokenizer}"
+AUDIO_TOKENIZER_DIR="${AUDIO_TOKENIZER_DIR:-}"
+AUDIO_TOKENIZER_REVISION="${AUDIO_TOKENIZER_REVISION:-}"
 MOSS_REPO="${MOSS_REPO:-https://github.com/OpenMOSS/MOSS-TTS.git}"
 MOSS_REF="${MOSS_REF:-main}"
 BOOTSTRAP_DOWNLOAD_MODEL="${BOOTSTRAP_DOWNLOAD_MODEL:-false}"
+BOOTSTRAP_DOWNLOAD_AUDIO_TOKENIZER="${BOOTSTRAP_DOWNLOAD_AUDIO_TOKENIZER:-true}"
 HF_HOME="${HF_HOME:-/tmp/huggingface-cache}"
 HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
 RUNPOD_HF_CACHE_DIR="${RUNPOD_HF_CACHE_DIR:-/runpod-volume/huggingface-cache/hub}"
@@ -51,6 +55,7 @@ SENTINEL="$VENV_DIR/.install_complete"
 AUDIO_VOICES_DIR="${AUDIO_VOICES_DIR:-$INSTALL_DIR/audio_voices}"
 OUTPUT_AUDIO_DIR="${OUTPUT_AUDIO_DIR:-$INSTALL_DIR/output_audio}"
 MODEL_DIR="${MODEL_DIR:-$INSTALL_DIR/models/$MODEL_REPO}"
+AUDIO_TOKENIZER_DIR="${AUDIO_TOKENIZER_DIR:-$INSTALL_DIR/models/$AUDIO_TOKENIZER_REPO}"
 
 LOG_FILE="$INSTALL_DIR/bootstrap.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -65,7 +70,12 @@ log "Model repo:  $MODEL_REPO"
 if [ -n "$MODEL_REVISION" ]; then
     log "Model revision: $MODEL_REVISION"
 fi
+log "Audio tokenizer repo: $AUDIO_TOKENIZER_REPO"
+if [ -n "$AUDIO_TOKENIZER_REVISION" ]; then
+    log "Audio tokenizer revision: $AUDIO_TOKENIZER_REVISION"
+fi
 log "Bootstrap download model: $BOOTSTRAP_DOWNLOAD_MODEL"
+log "Bootstrap download audio tokenizer: $BOOTSTRAP_DOWNLOAD_AUDIO_TOKENIZER"
 log "Docker source: $DOCKER_SRC"
 log "RunPod HF cache dir: $RUNPOD_HF_CACHE_DIR"
 if [[ "$HF_HUB_CACHE" == /runpod-volume/* ]]; then
@@ -93,7 +103,7 @@ done
 # ---------------------------------------------------------------------------
 # Ensure required directories exist
 # ---------------------------------------------------------------------------
-mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR" "$MODEL_DIR"
+mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR" "$MODEL_DIR" "$AUDIO_TOKENIZER_DIR"
 
 # ---------------------------------------------------------------------------
 # Clone MOSS-TTS source (first boot only)
@@ -202,9 +212,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Download model weights (first boot only)
+# Download model weights / auxiliary tokenizer (optional)
 # ---------------------------------------------------------------------------
 download_model_on_boot="$(echo "$BOOTSTRAP_DOWNLOAD_MODEL" | tr '[:upper:]' '[:lower:]')"
+download_audio_tokenizer_on_boot="$(echo "$BOOTSTRAP_DOWNLOAD_AUDIO_TOKENIZER" | tr '[:upper:]' '[:lower:]')"
+
 if [ "$download_model_on_boot" = "true" ] || [ "$download_model_on_boot" = "1" ]; then
     if [ ! -f "$MODEL_DIR/config.json" ]; then
         log "Downloading model weights ($MODEL_REPO)..."
@@ -226,13 +238,43 @@ else
     log "Skipping model download on bootstrap (BOOTSTRAP_DOWNLOAD_MODEL=$BOOTSTRAP_DOWNLOAD_MODEL)"
 fi
 
+if [ "$download_audio_tokenizer_on_boot" = "true" ] || [ "$download_audio_tokenizer_on_boot" = "1" ]; then
+    if [ ! -f "$AUDIO_TOKENIZER_DIR/config.json" ]; then
+        log "Downloading audio tokenizer weights ($AUDIO_TOKENIZER_REPO)..."
+        HF_HUB_ENABLE_HF_TRANSFER=1 "$VENV_DIR/bin/python3.12" - <<PYEOF
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="$AUDIO_TOKENIZER_REPO",
+    local_dir="$AUDIO_TOKENIZER_DIR",
+    revision="$AUDIO_TOKENIZER_REVISION" or None,
+    token=os.environ.get("HF_TOKEN") or None,
+)
+print("Audio tokenizer download complete.")
+PYEOF
+    else
+        log "Audio tokenizer already present at $AUDIO_TOKENIZER_DIR"
+    fi
+else
+    log "Skipping audio tokenizer download on bootstrap (BOOTSTRAP_DOWNLOAD_AUDIO_TOKENIZER=$BOOTSTRAP_DOWNLOAD_AUDIO_TOKENIZER)"
+fi
+
 if [ -f "$MODEL_DIR/config.json" ]; then
-    log "✓ config.json found — model looks intact."
+    log "✓ Model config.json found — model looks intact."
 elif [ "$download_model_on_boot" = "true" ] || [ "$download_model_on_boot" = "1" ]; then
-    log "WARNING: config.json not found at $MODEL_DIR"
+    log "WARNING: model config.json not found at $MODEL_DIR"
     ls -la "$MODEL_DIR" || true
 else
-    log "Model files not pre-downloaded; first inference request will download from HuggingFace."
+    log "Model files not pre-downloaded; first inference request may download from HuggingFace."
+fi
+
+if [ -f "$AUDIO_TOKENIZER_DIR/config.json" ]; then
+    log "✓ Audio tokenizer config.json found."
+elif [ "$download_audio_tokenizer_on_boot" = "true" ] || [ "$download_audio_tokenizer_on_boot" = "1" ]; then
+    log "WARNING: audio tokenizer config.json not found at $AUDIO_TOKENIZER_DIR"
+    ls -la "$AUDIO_TOKENIZER_DIR" || true
+else
+    log "Audio tokenizer files not pre-downloaded; first inference request may download from HuggingFace."
 fi
 
 # ---------------------------------------------------------------------------

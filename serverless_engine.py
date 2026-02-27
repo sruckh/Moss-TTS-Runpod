@@ -144,6 +144,9 @@ class MossTTSInference:
         self.dtype = (dtype or config.config.default_dtype).lower()
         self.attn_implementation = attn_implementation or config.config.default_attn_implementation
         self.model_revision = config.config.MODEL_REVISION
+        self.audio_tokenizer_repo = config.config.AUDIO_TOKENIZER_REPO
+        self.audio_tokenizer_dir = config.config.AUDIO_TOKENIZER_DIR
+        self.audio_tokenizer_revision = config.config.AUDIO_TOKENIZER_REVISION
 
         self._model = None
         self._processor = None
@@ -161,14 +164,14 @@ class MossTTSInference:
         ).exists()
         return has_config and has_weights
 
-    def _find_runpod_cached_snapshot(self) -> Optional[Path]:
+    def _find_runpod_cached_snapshot(self, repo_id: str, revision: Optional[str] = None) -> Optional[Path]:
         cache_root = config.config.RUNPOD_HF_CACHE_DIR
-        snapshots_dir = cache_root / f"models--{self.model_repo.replace('/', '--')}" / "snapshots"
+        snapshots_dir = cache_root / f"models--{repo_id.replace('/', '--')}" / "snapshots"
         if not snapshots_dir.exists():
             return None
 
-        if self.model_revision:
-            pinned = snapshots_dir / self.model_revision
+        if revision:
+            pinned = snapshots_dir / revision
             if self._is_complete_model_dir(pinned):
                 return pinned
 
@@ -179,13 +182,28 @@ class MossTTSInference:
                 return snapshot
         return None
 
-    def _resolve_model_source(self) -> Tuple[str, bool, str]:
-        runpod_snapshot = self._find_runpod_cached_snapshot()
+    def _resolve_repo_source(
+        self,
+        repo_id: str,
+        local_dir: Path,
+        revision: Optional[str] = None,
+    ) -> Tuple[str, bool, str]:
+        runpod_snapshot = self._find_runpod_cached_snapshot(repo_id, revision)
         if runpod_snapshot is not None:
             return str(runpod_snapshot), True, "runpod-cache"
-        if self._is_complete_model_dir(self.model_dir):
-            return str(self.model_dir), True, "local-volume"
-        return self.model_repo, False, "huggingface-hub"
+        if self._is_complete_model_dir(local_dir):
+            return str(local_dir), True, "local-volume"
+        return repo_id, False, "huggingface-hub"
+
+    def _resolve_model_source(self) -> Tuple[str, bool, str]:
+        return self._resolve_repo_source(self.model_repo, self.model_dir, self.model_revision)
+
+    def _resolve_audio_tokenizer_source(self) -> Tuple[str, bool, str]:
+        return self._resolve_repo_source(
+            self.audio_tokenizer_repo,
+            self.audio_tokenizer_dir,
+            self.audio_tokenizer_revision,
+        )
 
     def _resolve_dtype(self) -> torch.dtype:
         if self.dtype in {"auto", ""}:
@@ -237,6 +255,8 @@ class MossTTSInference:
             self._torch_device = torch.device("cuda" if requested_device == "cuda" and cuda_available else "cpu")
             self._torch_dtype = self._resolve_dtype()
             model_source, local_files_only, source_kind = self._resolve_model_source()
+            audio_tokenizer_source, audio_tokenizer_local, audio_source_kind = self._resolve_audio_tokenizer_source()
+            processor_local_only = local_files_only and audio_tokenizer_local
 
             resolved_attn = self._resolve_attn_implementation()
             log.info(
@@ -245,26 +265,33 @@ class MossTTSInference:
                 source_kind,
                 local_files_only,
             )
+            log.info(
+                "Loading audio tokenizer from %s (source=%s, local_only=%s)",
+                audio_tokenizer_source,
+                audio_source_kind,
+                processor_local_only,
+            )
             log.info("Device=%s dtype=%s attn=%s", self._torch_device, self._torch_dtype, resolved_attn)
 
             base_processor_kwargs: Dict[str, Any] = {
                 "trust_remote_code": True,
-                "local_files_only": local_files_only,
+                "local_files_only": processor_local_only,
+                "codec_path": audio_tokenizer_source,
             }
-            if self.model_revision and not local_files_only:
+            if self.model_revision and not processor_local_only and audio_source_kind != "huggingface-hub":
                 base_processor_kwargs["revision"] = self.model_revision
 
             processor_kwargs = dict(base_processor_kwargs)
             try:
                 self._processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
             except Exception as exc:
-                if local_files_only and _is_local_only_miss(exc):
+                if processor_local_only and _is_local_only_miss(exc):
                     log.warning(
                         "Local-only processor load missed files from source=%s; retrying with online fallback.",
                         source_kind,
                     )
                     processor_kwargs["local_files_only"] = False
-                    if self.model_revision:
+                    if self.model_revision and audio_source_kind != "huggingface-hub":
                         processor_kwargs["revision"] = self.model_revision
                     self._processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
                 else:

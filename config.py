@@ -25,6 +25,12 @@ DEFAULT_MODEL_REPO = "OpenMOSS-Team/MOSS-TTS"
 MODEL_REPO = os.environ.get("MODEL_REPO", DEFAULT_MODEL_REPO)
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", str(MODELS_ROOT / MODEL_REPO)))
 MODEL_REVISION = os.environ.get("MODEL_REVISION")
+DEFAULT_AUDIO_TOKENIZER_REPO = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
+AUDIO_TOKENIZER_REPO = os.environ.get("AUDIO_TOKENIZER_REPO", DEFAULT_AUDIO_TOKENIZER_REPO)
+AUDIO_TOKENIZER_DIR = Path(
+    os.environ.get("AUDIO_TOKENIZER_DIR", str(MODELS_ROOT / AUDIO_TOKENIZER_REPO))
+)
+AUDIO_TOKENIZER_REVISION = os.environ.get("AUDIO_TOKENIZER_REVISION")
 RUNPOD_HF_CACHE_DIR = Path(
     os.environ.get("RUNPOD_HF_CACHE_DIR", "/runpod-volume/huggingface-cache/hub")
 )
@@ -74,6 +80,9 @@ class Config:
         self.MODEL_REPO = MODEL_REPO
         self.MODEL_DIR = MODEL_DIR
         self.MODEL_REVISION = MODEL_REVISION
+        self.AUDIO_TOKENIZER_REPO = AUDIO_TOKENIZER_REPO
+        self.AUDIO_TOKENIZER_DIR = AUDIO_TOKENIZER_DIR
+        self.AUDIO_TOKENIZER_REVISION = AUDIO_TOKENIZER_REVISION
         self.RUNPOD_HF_CACHE_DIR = RUNPOD_HF_CACHE_DIR
 
         self.device = DEVICE
@@ -106,6 +115,7 @@ class Config:
             self.OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
             self.MODELS_ROOT.mkdir(parents=True, exist_ok=True)
             self.MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            self.AUDIO_TOKENIZER_DIR.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             self.validation_errors.append(f"Failed to create directories: {exc}")
 
@@ -121,6 +131,10 @@ class Config:
         if self.MODEL_REVISION:
             log.info("Model revision: %s", self.MODEL_REVISION)
         log.info("Model dir: %s", self.MODEL_DIR)
+        log.info("Audio tokenizer repo: %s", self.AUDIO_TOKENIZER_REPO)
+        if self.AUDIO_TOKENIZER_REVISION:
+            log.info("Audio tokenizer revision: %s", self.AUDIO_TOKENIZER_REVISION)
+        log.info("Audio tokenizer dir: %s", self.AUDIO_TOKENIZER_DIR)
         log.info("RunPod HF cache dir: %s", self.RUNPOD_HF_CACHE_DIR)
         log.info("Device: %s", self.device)
 
