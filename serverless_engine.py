@@ -363,16 +363,10 @@ class MossTTSInference:
             log.warning("DEFAULT_AUDIO_TOKENIZER_DEVICE=cuda requested but CUDA is unavailable; using CPU.")
             return torch.device("cpu")
 
-        # auto: keep tokenizer on CPU for <=24GB VRAM GPUs to avoid preprocessing OOM.
-        if self._torch_device is None or self._torch_device.type != "cuda":
-            return torch.device("cpu")
-        try:
-            total_gb = torch.cuda.get_device_properties(self._torch_device).total_memory / (1024 ** 3)
-        except Exception:
-            return torch.device("cpu")
-        if total_gb <= 24.5:
-            return torch.device("cpu")
-        return self._torch_device
+        # auto: follow the model device.
+        if self._torch_device is not None:
+            return self._torch_device
+        return torch.device("cpu")
 
     def _resolve_voice_path_or_url(self, value: Optional[str]) -> Optional[str]:
         if not value:
@@ -461,23 +455,24 @@ class MossTTSInference:
             expected_tokens=expected_tokens,
         )
 
-        batch = self._processor(conversations, mode=processor_mode)
-        input_ids = batch["input_ids"].to(self._torch_device)
-        attention_mask = batch["attention_mask"].to(self._torch_device)
-
-        max_new_tokens = self._cap_max_new_tokens_for_vram(max_new_tokens)
-        generate_kwargs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "max_new_tokens": int(max_new_tokens),
-            "audio_temperature": float(audio_temperature),
-            "audio_top_p": float(audio_top_p),
-            "audio_top_k": int(audio_top_k),
-            "audio_repetition_penalty": float(audio_repetition_penalty),
-        }
         try:
             with torch.inference_mode():
+                batch = self._processor(conversations, mode=processor_mode)
+                input_ids = batch["input_ids"].to(self._torch_device)
+                attention_mask = batch["attention_mask"].to(self._torch_device)
+
+                max_new_tokens = self._cap_max_new_tokens_for_vram(max_new_tokens)
+                generate_kwargs = {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "max_new_tokens": int(max_new_tokens),
+                    "audio_temperature": float(audio_temperature),
+                    "audio_top_p": float(audio_top_p),
+                    "audio_top_k": int(audio_top_k),
+                    "audio_repetition_penalty": float(audio_repetition_penalty),
+                }
                 outputs = self._model.generate(**generate_kwargs)
+                messages = self._processor.decode(outputs)
         except Exception as exc:
             if self._is_cuda_oom(exc) and self._torch_device is not None and self._torch_device.type == "cuda":
                 retry_tokens = max(128, min(int(max_new_tokens), self.oom_retry_max_new_tokens))
@@ -488,15 +483,29 @@ class MossTTSInference:
                         retry_tokens,
                     )
                     torch.cuda.empty_cache()
-                    generate_kwargs["max_new_tokens"] = retry_tokens
                     with torch.inference_mode():
+                        batch = self._processor(conversations, mode=processor_mode)
+                        input_ids = batch["input_ids"].to(self._torch_device)
+                        attention_mask = batch["attention_mask"].to(self._torch_device)
+                        generate_kwargs = {
+                            "input_ids": input_ids,
+                            "attention_mask": attention_mask,
+                            "max_new_tokens": retry_tokens,
+                            "audio_temperature": float(audio_temperature),
+                            "audio_top_p": float(audio_top_p),
+                            "audio_top_k": int(audio_top_k),
+                            "audio_repetition_penalty": float(audio_repetition_penalty),
+                        }
                         outputs = self._model.generate(**generate_kwargs)
+                        messages = self._processor.decode(outputs)
                 else:
+                    torch.cuda.empty_cache()
                     raise
             else:
+                if self._torch_device is not None and self._torch_device.type == "cuda":
+                    torch.cuda.empty_cache()
                 raise
 
-        messages = self._processor.decode(outputs)
         if not messages:
             raise RuntimeError("Model returned no messages")
 
