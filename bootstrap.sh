@@ -28,9 +28,12 @@ AUDIO_VOICES_DIR="${AUDIO_VOICES_DIR:-}"
 OUTPUT_AUDIO_DIR="${OUTPUT_AUDIO_DIR:-}"
 MODEL_REPO="${MODEL_REPO:-OpenMOSS-Team/MOSS-TTS}"
 MODEL_DIR="${MODEL_DIR:-}"
+MODEL_REVISION="${MODEL_REVISION:-}"
 MOSS_REPO="${MOSS_REPO:-https://github.com/OpenMOSS/MOSS-TTS.git}"
 MOSS_REF="${MOSS_REF:-main}"
 BOOTSTRAP_DOWNLOAD_MODEL="${BOOTSTRAP_DOWNLOAD_MODEL:-false}"
+HF_HOME="${HF_HOME:-/tmp/huggingface-cache}"
+HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -58,8 +61,20 @@ log "Source dir:  $SRC_DIR"
 log "Venv dir:    $VENV_DIR"
 log "Sentinel:    $SENTINEL"
 log "Model repo:  $MODEL_REPO"
+if [ -n "$MODEL_REVISION" ]; then
+    log "Model revision: $MODEL_REVISION"
+fi
 log "Bootstrap download model: $BOOTSTRAP_DOWNLOAD_MODEL"
 log "Docker source: $DOCKER_SRC"
+if [[ "$HF_HUB_CACHE" == /runpod-volume/* ]]; then
+    log "WARNING: HF_HUB_CACHE points to network volume ($HF_HUB_CACHE). Using /tmp cache to avoid NFS lock issues."
+    HF_HOME="/tmp/huggingface-cache"
+    HF_HUB_CACHE="$HF_HOME/hub"
+fi
+mkdir -p "$HF_HUB_CACHE"
+export HF_HOME HF_HUB_CACHE
+log "HF_HOME:     $HF_HOME"
+log "HF_HUB_CACHE:$HF_HUB_CACHE"
 
 for required_file in handler.py config.py serverless_engine.py; do
     if [ ! -f "$DOCKER_SRC/$required_file" ]; then
@@ -192,6 +207,7 @@ from huggingface_hub import snapshot_download
 snapshot_download(
     repo_id="$MODEL_REPO",
     local_dir="$MODEL_DIR",
+    revision="$MODEL_REVISION" or None,
     token=os.environ.get("HF_TOKEN") or None,
 )
 print("Model download complete.")

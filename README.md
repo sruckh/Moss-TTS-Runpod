@@ -99,6 +99,7 @@ docker push your-registry/moss-tts:latest
 |----------|-------------|---------|
 | `HF_TOKEN` | HuggingFace authentication token | - |
 | `MODEL_REPO` | HuggingFace model repository | `OpenMOSS-Team/MOSS-TTS` |
+| `MODEL_REVISION` | Optional pinned HuggingFace revision/commit SHA | - |
 | `MOSS_REF` | Git branch/commit for MOSS-TTS source | `main` |
 | `RUNPOD_INIT_TIMEOUT` | Worker init timeout in seconds (important for long first boot) | `2400` |
 | `BOOTSTRAP_DOWNLOAD_MODEL` | Download model during bootstrap (`true`) or lazily on first request (`false`) | `false` |

@@ -4,8 +4,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     PYTHONUNBUFFERED=1 \
-    HF_HOME=/runpod-volume/huggingface-cache \
-    HF_HUB_CACHE=/runpod-volume/huggingface-cache/hub \
+    HF_HOME=/tmp/huggingface-cache \
+    HF_HUB_CACHE=/tmp/huggingface-cache/hub \
     RUNPOD_INIT_TIMEOUT=2400
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -5,6 +5,7 @@ import gc
 import importlib.util
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -25,6 +26,7 @@ torch.backends.cuda.enable_mem_efficient_sdp(True)
 torch.backends.cuda.enable_math_sdp(True)
 
 _WHITESPACE_RE = re.compile(r"\s+")
+_MODEL_INIT_LOCK = threading.Lock()
 
 
 def is_http_url(value: str) -> bool:
@@ -131,6 +133,7 @@ class MossTTSInference:
         self.device = device or config.config.device
         self.dtype = (dtype or config.config.default_dtype).lower()
         self.attn_implementation = attn_implementation or config.config.default_attn_implementation
+        self.model_revision = config.config.MODEL_REVISION
 
         self._model = None
         self._processor = None
@@ -138,10 +141,19 @@ class MossTTSInference:
         self._torch_dtype = None
         self._sample_rate = config.DEFAULT_SAMPLE_RATE
 
-    def _resolve_model_source(self) -> str:
-        if self.model_dir.exists() and any(self.model_dir.iterdir()):
-            return str(self.model_dir)
-        return self.model_repo
+    def _has_local_model(self) -> bool:
+        if not self.model_dir.exists():
+            return False
+        has_config = (self.model_dir / "config.json").exists()
+        has_weights = (self.model_dir / "model.safetensors").exists() or (
+            self.model_dir / "model.safetensors.index.json"
+        ).exists()
+        return has_config and has_weights
+
+    def _resolve_model_source(self) -> Tuple[str, bool]:
+        if self._has_local_model():
+            return str(self.model_dir), True
+        return self.model_repo, False
 
     def _resolve_dtype(self) -> torch.dtype:
         if self.dtype in {"auto", ""}:
@@ -178,38 +190,51 @@ class MossTTSInference:
         if self._model is not None and self._processor is not None:
             return
 
-        cuda_available = torch.cuda.is_available()
-        requested_device = (self.device or "cpu").lower()
-        if requested_device == "cuda" and not cuda_available:
-            log.warning(
-                "CUDA requested but unavailable. Falling back to CPU. "
-                "This usually indicates a CUDA runtime/driver mismatch in the container."
-            )
+        with _MODEL_INIT_LOCK:
+            if self._model is not None and self._processor is not None:
+                return
 
-        self._torch_device = torch.device("cuda" if requested_device == "cuda" and cuda_available else "cpu")
-        self._torch_dtype = self._resolve_dtype()
-        model_source = self._resolve_model_source()
+            cuda_available = torch.cuda.is_available()
+            requested_device = (self.device or "cpu").lower()
+            if requested_device == "cuda" and not cuda_available:
+                log.warning(
+                    "CUDA requested but unavailable. Falling back to CPU. "
+                    "This usually indicates a CUDA runtime/driver mismatch in the container."
+                )
 
-        resolved_attn = self._resolve_attn_implementation()
-        log.info("Loading MOSS-TTS model from %s", model_source)
-        log.info("Device=%s dtype=%s attn=%s", self._torch_device, self._torch_dtype, resolved_attn)
+            self._torch_device = torch.device("cuda" if requested_device == "cuda" and cuda_available else "cpu")
+            self._torch_dtype = self._resolve_dtype()
+            model_source, local_files_only = self._resolve_model_source()
 
-        self._processor = AutoProcessor.from_pretrained(model_source, trust_remote_code=True)
-        if hasattr(self._processor, "audio_tokenizer"):
-            self._processor.audio_tokenizer = self._processor.audio_tokenizer.to(self._torch_device)
+            resolved_attn = self._resolve_attn_implementation()
+            log.info("Loading MOSS-TTS model from %s (local_only=%s)", model_source, local_files_only)
+            log.info("Device=%s dtype=%s attn=%s", self._torch_device, self._torch_dtype, resolved_attn)
 
-        model_kwargs: Dict[str, Any] = {
-            "trust_remote_code": True,
-            "torch_dtype": self._torch_dtype,
-        }
-        if resolved_attn:
-            model_kwargs["attn_implementation"] = resolved_attn
+            processor_kwargs: Dict[str, Any] = {
+                "trust_remote_code": True,
+                "local_files_only": local_files_only,
+            }
+            if self.model_revision and not local_files_only:
+                processor_kwargs["revision"] = self.model_revision
+            self._processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
+            if hasattr(self._processor, "audio_tokenizer"):
+                self._processor.audio_tokenizer = self._processor.audio_tokenizer.to(self._torch_device)
 
-        self._model = AutoModel.from_pretrained(model_source, **model_kwargs).to(self._torch_device)
-        self._model.eval()
+            model_kwargs: Dict[str, Any] = {
+                "trust_remote_code": True,
+                "dtype": self._torch_dtype,
+                "local_files_only": local_files_only,
+            }
+            if self.model_revision and not local_files_only:
+                model_kwargs["revision"] = self.model_revision
+            if resolved_attn:
+                model_kwargs["attn_implementation"] = resolved_attn
 
-        self._sample_rate = int(getattr(self._processor.model_config, "sampling_rate", config.DEFAULT_SAMPLE_RATE))
-        log.info("Model loaded; sample_rate=%s", self._sample_rate)
+            self._model = AutoModel.from_pretrained(model_source, **model_kwargs).to(self._torch_device)
+            self._model.eval()
+
+            self._sample_rate = int(getattr(self._processor.model_config, "sampling_rate", config.DEFAULT_SAMPLE_RATE))
+            log.info("Model loaded; sample_rate=%s", self._sample_rate)
 
     def _resolve_voice_path_or_url(self, value: Optional[str]) -> Optional[str]:
         if not value:
