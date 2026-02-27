@@ -92,14 +92,8 @@ class Config:
         self.sample_rate = DEFAULT_SAMPLE_RATE
         self.AUDIO_EXTS = AUDIO_EXTS
 
-        try:
-            import torch
-            if torch.cuda.is_available():
-                gpu_name = torch.cuda.get_device_name(0)
-                gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                log.info("GPU detected: %s (%.1f GB)", gpu_name, gpu_memory)
-        except Exception as exc:
-            log.warning("GPU probe failed: %s", exc)
+        # Avoid eager CUDA probing during import/startup. On some RunPod hosts
+        # this can emit non-actionable warnings before the worker has started.
 
         try:
             self.AUDIO_VOICES_DIR.mkdir(parents=True, exist_ok=True)

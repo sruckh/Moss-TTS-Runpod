@@ -178,7 +178,15 @@ class MossTTSInference:
         if self._model is not None and self._processor is not None:
             return
 
-        self._torch_device = torch.device(self.device if torch.cuda.is_available() else "cpu")
+        cuda_available = torch.cuda.is_available()
+        requested_device = (self.device or "cpu").lower()
+        if requested_device == "cuda" and not cuda_available:
+            log.warning(
+                "CUDA requested but unavailable. Falling back to CPU. "
+                "This usually indicates a CUDA runtime/driver mismatch in the container."
+            )
+
+        self._torch_device = torch.device("cuda" if requested_device == "cuda" and cuda_available else "cpu")
         self._torch_dtype = self._resolve_dtype()
         model_source = self._resolve_model_source()
 
@@ -550,7 +558,7 @@ class MossTTSInference:
             del self._processor
             self._processor = None
         gc.collect()
-        if torch.cuda.is_available():
+        if self._torch_device is not None and self._torch_device.type == "cuda":
             torch.cuda.empty_cache()
 
 

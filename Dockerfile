@@ -1,4 +1,4 @@
-FROM runpod/base:1.0.3-cuda1290-ubuntu2404
+FROM runpod/base:1.0.3-cuda1281-ubuntu2404
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
