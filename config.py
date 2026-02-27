@@ -47,6 +47,8 @@ DEFAULT_AUDIO_TOKENIZER_DEVICE = os.environ.get("DEFAULT_AUDIO_TOKENIZER_DEVICE"
 DEFAULT_MAX_NEW_TOKENS = int(os.environ.get("DEFAULT_MAX_NEW_TOKENS", "4096"))
 OOM_TOKEN_CAP_24GB = int(os.environ.get("OOM_TOKEN_CAP_24GB", "2048"))
 OOM_RETRY_MAX_NEW_TOKENS = int(os.environ.get("OOM_RETRY_MAX_NEW_TOKENS", "1024"))
+MAX_REFERENCE_AUDIO_SECONDS = int(os.environ.get("MAX_REFERENCE_AUDIO_SECONDS", "20"))
+MAX_PREFIX_AUDIO_SECONDS = int(os.environ.get("MAX_PREFIX_AUDIO_SECONDS", "120"))
 
 DEFAULT_AUDIO_TEMPERATURE = float(os.environ.get("DEFAULT_AUDIO_TEMPERATURE", "1.7"))
 DEFAULT_AUDIO_TOP_P = float(os.environ.get("DEFAULT_AUDIO_TOP_P", "0.8"))
@@ -99,6 +101,8 @@ class Config:
         self.default_max_new_tokens = DEFAULT_MAX_NEW_TOKENS
         self.oom_token_cap_24gb = OOM_TOKEN_CAP_24GB
         self.oom_retry_max_new_tokens = OOM_RETRY_MAX_NEW_TOKENS
+        self.max_reference_audio_seconds = MAX_REFERENCE_AUDIO_SECONDS
+        self.max_prefix_audio_seconds = MAX_PREFIX_AUDIO_SECONDS
 
         self.default_audio_temperature = DEFAULT_AUDIO_TEMPERATURE
         self.default_audio_top_p = DEFAULT_AUDIO_TOP_P

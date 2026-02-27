@@ -167,7 +167,26 @@ def upload_to_s3(audio_bytes: bytes, filename: str) -> str:
     )
 
 
-def _validate_audio_field(value: Optional[str], field_name: str) -> Optional[str]:
+def _enforce_audio_duration_limit(audio_path, field_name: str, max_seconds: Optional[int]) -> None:
+    if max_seconds is None or int(max_seconds) <= 0:
+        return
+    try:
+        info = torchaudio.info(str(audio_path))
+        if info.sample_rate <= 0:
+            return
+        duration_sec = float(info.num_frames) / float(info.sample_rate)
+        if duration_sec > float(max_seconds):
+            raise ValueError(
+                f"{field_name} too long ({duration_sec:.1f}s). "
+                f"Max supported is {int(max_seconds)}s on this worker profile."
+            )
+    except ValueError:
+        raise
+    except Exception as exc:
+        log.warning(f"Could not inspect {field_name} duration for '{audio_path}': {exc}")
+
+
+def _validate_audio_field(value: Optional[str], field_name: str, max_seconds: Optional[int] = None) -> Optional[str]:
     if not value:
         return None
 
@@ -187,6 +206,7 @@ def _validate_audio_field(value: Optional[str], field_name: str) -> Optional[str
     if candidate.exists():
         if candidate.suffix.lower() not in config.AUDIO_EXTS:
             raise ValueError(f"Unsupported {field_name} extension: {candidate.suffix}")
+        _enforce_audio_duration_limit(candidate, field_name, max_seconds)
         return value
 
     if os.path.splitext(value)[1]:
@@ -195,6 +215,7 @@ def _validate_audio_field(value: Optional[str], field_name: str) -> Optional[str
     for ext in config.AUDIO_EXTS:
         test_path = audio_root / f"{value}{ext}"
         if test_path.exists():
+            _enforce_audio_duration_limit(test_path, field_name, max_seconds)
             return f"{value}{ext}"
 
     available = [
@@ -264,8 +285,16 @@ def extract_and_validate_params(job_input: Dict[str, Any]):
         return None, {"error": "mode must be 'generation' or 'continuation'"}
 
     try:
-        reference_audio = _validate_audio_field(job_input.get("reference_audio"), "reference_audio")
-        prefix_audio = _validate_audio_field(job_input.get("prefix_audio"), "prefix_audio")
+        reference_audio = _validate_audio_field(
+            job_input.get("reference_audio"),
+            "reference_audio",
+            config.max_reference_audio_seconds,
+        )
+        prefix_audio = _validate_audio_field(
+            job_input.get("prefix_audio"),
+            "prefix_audio",
+            config.max_prefix_audio_seconds,
+        )
     except ValueError as exc:
         return None, {"error": str(exc)}
 
