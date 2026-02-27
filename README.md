@@ -100,6 +100,8 @@ docker push your-registry/moss-tts:latest
 | `HF_TOKEN` | HuggingFace authentication token | - |
 | `MODEL_REPO` | HuggingFace model repository | `OpenMOSS-Team/MOSS-TTS` |
 | `MOSS_REF` | Git branch/commit for MOSS-TTS source | `main` |
+| `RUNPOD_INIT_TIMEOUT` | Worker init timeout in seconds (important for long first boot) | `2400` |
+| `BOOTSTRAP_DOWNLOAD_MODEL` | Download model during bootstrap (`true`) or lazily on first request (`false`) | `false` |
 | `AUDIO_VOICES_DIR` | Directory for reference audio files | `/runpod-volume/moss-tts/audio_voices` |
 | `OUTPUT_AUDIO_DIR` | Directory for temporary output | `/runpod-volume/moss-tts/output_audio` |
 | `MODEL_DIR` | Model weights location | `/runpod-volume/moss-tts/models/OpenMOSS-Team/MOSS-TTS` |

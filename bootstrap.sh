@@ -1,17 +1,18 @@
 #!/bin/bash
 # MOSS-TTS RunPod Serverless Bootstrap
 #
-# First boot (~20-30 min):
+# First boot (~10-20 min, longer if model pre-download is enabled):
 #   - Clones MOSS-TTS source + initialises moss_audio_tokenizer submodule
 #   - Installs all Python packages via uv in copy mode (NFS-safe)
-#   - Downloads model weights from HuggingFace
+#   - Optionally pre-downloads model weights from HuggingFace
 #
 # Subsequent boots (~seconds):
 #   - Copies latest handler files from Docker image
 #   - Skips install (sentinel guards against partial installs)
 #   - Starts the RunPod handler
 
-set -e
+set -Eeuo pipefail
+trap 'echo "[$(date '\''+%Y-%m-%d %H:%M:%S'\'')] ERROR at line $LINENO: \"$BASH_COMMAND\" exited with status $?" >&2' ERR
 
 echo "=== MOSS-TTS RunPod Bootstrap Starting ==="
 
@@ -19,22 +20,35 @@ echo "=== MOSS-TTS RunPod Bootstrap Starting ==="
 # Configuration
 # ---------------------------------------------------------------------------
 INSTALL_DIR="${INSTALL_DIR:-/runpod-volume/moss-tts}"
-DOCKER_SRC="/opt/moss-tts"
+DOCKER_SRC="${DOCKER_SRC:-/opt/moss-tts}"
+SRC_DIR="$INSTALL_DIR/src"
+VENV_DIR="$INSTALL_DIR/venv"
+SENTINEL="$VENV_DIR/.install_complete"
+AUDIO_VOICES_DIR="${AUDIO_VOICES_DIR:-}"
+OUTPUT_AUDIO_DIR="${OUTPUT_AUDIO_DIR:-}"
+MODEL_REPO="${MODEL_REPO:-OpenMOSS-Team/MOSS-TTS}"
+MODEL_DIR="${MODEL_DIR:-}"
+MOSS_REPO="${MOSS_REPO:-https://github.com/OpenMOSS/MOSS-TTS.git}"
+MOSS_REF="${MOSS_REF:-main}"
+BOOTSTRAP_DOWNLOAD_MODEL="${BOOTSTRAP_DOWNLOAD_MODEL:-false}"
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+if ! mkdir -p "$INSTALL_DIR" 2>/dev/null || [ ! -w "$INSTALL_DIR" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: INSTALL_DIR '$INSTALL_DIR' is not writable. Falling back to /tmp/moss-tts"
+    INSTALL_DIR="/tmp/moss-tts"
+    mkdir -p "$INSTALL_DIR"
+fi
+
 SRC_DIR="$INSTALL_DIR/src"
 VENV_DIR="$INSTALL_DIR/venv"
 SENTINEL="$VENV_DIR/.install_complete"
 AUDIO_VOICES_DIR="${AUDIO_VOICES_DIR:-$INSTALL_DIR/audio_voices}"
 OUTPUT_AUDIO_DIR="${OUTPUT_AUDIO_DIR:-$INSTALL_DIR/output_audio}"
-MODEL_REPO="${MODEL_REPO:-OpenMOSS-Team/MOSS-TTS}"
 MODEL_DIR="${MODEL_DIR:-$INSTALL_DIR/models/$MODEL_REPO}"
-MOSS_REPO="${MOSS_REPO:-https://github.com/OpenMOSS/MOSS-TTS.git}"
-MOSS_REF="${MOSS_REF:-main}"
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 LOG_FILE="$INSTALL_DIR/bootstrap.log"
-mkdir -p "$INSTALL_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
@@ -44,6 +58,15 @@ log "Source dir:  $SRC_DIR"
 log "Venv dir:    $VENV_DIR"
 log "Sentinel:    $SENTINEL"
 log "Model repo:  $MODEL_REPO"
+log "Bootstrap download model: $BOOTSTRAP_DOWNLOAD_MODEL"
+log "Docker source: $DOCKER_SRC"
+
+for required_file in handler.py config.py serverless_engine.py; do
+    if [ ! -f "$DOCKER_SRC/$required_file" ]; then
+        log "ERROR: required file not found: $DOCKER_SRC/$required_file"
+        exit 1
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Ensure required directories exist
@@ -149,7 +172,7 @@ if [ ! -f "$SENTINEL" ]; then
     # Sentinel written ONLY after every install above succeeds.
     # If anything above exits non-zero, set -e kills bootstrap before we
     # reach this line, the sentinel is never written, and the next boot
-    # starts fresh (--clear wipes the partial venv).
+    # retries installation on the existing partial venv.
     touch "$SENTINEL"
     log "=== Python environment install complete ==="
 else
@@ -159,9 +182,11 @@ fi
 # ---------------------------------------------------------------------------
 # Download model weights (first boot only)
 # ---------------------------------------------------------------------------
-if [ ! -f "$MODEL_DIR/config.json" ]; then
-    log "Downloading model weights ($MODEL_REPO)..."
-    HF_HUB_ENABLE_HF_TRANSFER=1 "$VENV_DIR/bin/python3.12" - <<PYEOF
+download_model_on_boot="$(echo "$BOOTSTRAP_DOWNLOAD_MODEL" | tr '[:upper:]' '[:lower:]')"
+if [ "$download_model_on_boot" = "true" ] || [ "$download_model_on_boot" = "1" ]; then
+    if [ ! -f "$MODEL_DIR/config.json" ]; then
+        log "Downloading model weights ($MODEL_REPO)..."
+        HF_HUB_ENABLE_HF_TRANSFER=1 "$VENV_DIR/bin/python3.12" - <<PYEOF
 import os
 from huggingface_hub import snapshot_download
 snapshot_download(
@@ -171,15 +196,20 @@ snapshot_download(
 )
 print("Model download complete.")
 PYEOF
+    else
+        log "Model already present at $MODEL_DIR"
+    fi
 else
-    log "Model already present at $MODEL_DIR"
+    log "Skipping model download on bootstrap (BOOTSTRAP_DOWNLOAD_MODEL=$BOOTSTRAP_DOWNLOAD_MODEL)"
 fi
 
 if [ -f "$MODEL_DIR/config.json" ]; then
     log "✓ config.json found — model looks intact."
-else
+elif [ "$download_model_on_boot" = "true" ] || [ "$download_model_on_boot" = "1" ]; then
     log "WARNING: config.json not found at $MODEL_DIR"
     ls -la "$MODEL_DIR" || true
+else
+    log "Model files not pre-downloaded; first inference request will download from HuggingFace."
 fi
 
 # ---------------------------------------------------------------------------
