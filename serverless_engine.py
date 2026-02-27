@@ -368,6 +368,14 @@ class MossTTSInference:
             return self._torch_device
         return torch.device("cpu")
 
+    def _get_audio_tokenizer_device(self) -> torch.device:
+        if not hasattr(self._processor, "audio_tokenizer") or self._processor.audio_tokenizer is None:
+            return torch.device("cpu")
+        try:
+            return next(self._processor.audio_tokenizer.parameters()).device
+        except Exception:
+            return torch.device("cpu")
+
     def _resolve_voice_path_or_url(self, value: Optional[str]) -> Optional[str]:
         if not value:
             return None
@@ -454,10 +462,33 @@ class MossTTSInference:
             prefix_audio=prefix_audio,
             expected_tokens=expected_tokens,
         )
+        audio_tokenizer_prev_device: Optional[torch.device] = None
+        used_audio_tokenizer_cpu_fallback = False
 
         try:
             with torch.inference_mode():
-                batch = self._processor(conversations, mode=processor_mode)
+                try:
+                    batch = self._processor(conversations, mode=processor_mode)
+                except Exception as proc_exc:
+                    if (
+                        self._is_cuda_oom(proc_exc)
+                        and self._torch_device is not None
+                        and self._torch_device.type == "cuda"
+                        and hasattr(self._processor, "audio_tokenizer")
+                    ):
+                        audio_tokenizer_prev_device = self._get_audio_tokenizer_device()
+                        if audio_tokenizer_prev_device.type == "cuda":
+                            log.warning(
+                                "CUDA OOM during processor step; retrying with audio tokenizer on CPU for this request."
+                            )
+                            self._processor.audio_tokenizer = self._processor.audio_tokenizer.to(torch.device("cpu"))
+                            torch.cuda.empty_cache()
+                            used_audio_tokenizer_cpu_fallback = True
+                            batch = self._processor(conversations, mode=processor_mode)
+                        else:
+                            raise
+                    else:
+                        raise
                 input_ids = batch["input_ids"].to(self._torch_device)
                 attention_mask = batch["attention_mask"].to(self._torch_device)
 
@@ -484,7 +515,28 @@ class MossTTSInference:
                     )
                     torch.cuda.empty_cache()
                     with torch.inference_mode():
-                        batch = self._processor(conversations, mode=processor_mode)
+                        try:
+                            batch = self._processor(conversations, mode=processor_mode)
+                        except Exception as proc_exc:
+                            if (
+                                self._is_cuda_oom(proc_exc)
+                                and self._torch_device is not None
+                                and self._torch_device.type == "cuda"
+                                and hasattr(self._processor, "audio_tokenizer")
+                            ):
+                                audio_tokenizer_prev_device = self._get_audio_tokenizer_device()
+                                if audio_tokenizer_prev_device.type == "cuda":
+                                    log.warning(
+                                        "CUDA OOM during retry processor step; using CPU audio tokenizer."
+                                    )
+                                    self._processor.audio_tokenizer = self._processor.audio_tokenizer.to(torch.device("cpu"))
+                                    torch.cuda.empty_cache()
+                                    used_audio_tokenizer_cpu_fallback = True
+                                    batch = self._processor(conversations, mode=processor_mode)
+                                else:
+                                    raise
+                            else:
+                                raise
                         input_ids = batch["input_ids"].to(self._torch_device)
                         attention_mask = batch["attention_mask"].to(self._torch_device)
                         generate_kwargs = {
@@ -521,6 +573,17 @@ class MossTTSInference:
         del batch, input_ids, attention_mask, outputs, messages
         if self._torch_device is not None and self._torch_device.type == "cuda":
             torch.cuda.empty_cache()
+            if (
+                used_audio_tokenizer_cpu_fallback
+                and audio_tokenizer_prev_device is not None
+                and audio_tokenizer_prev_device.type == "cuda"
+                and hasattr(self._processor, "audio_tokenizer")
+            ):
+                try:
+                    self._processor.audio_tokenizer = self._processor.audio_tokenizer.to(audio_tokenizer_prev_device)
+                    log.info("Restored audio tokenizer back to %s after CPU fallback.", audio_tokenizer_prev_device)
+                except Exception as exc:
+                    log.warning("Could not restore audio tokenizer back to CUDA: %s", exc)
 
         return audio_tensor, self._sample_rate
 
