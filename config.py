@@ -14,6 +14,8 @@ S3_ACCESS_KEY_ID = os.environ.get("S3_ACCESS_KEY_ID")
 S3_SECRET_ACCESS_KEY = os.environ.get("S3_SECRET_ACCESS_KEY")
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
 S3_REGION = os.environ.get("S3_REGION", "us-east-1")
+S3_SIGNATURE_VERSION = os.environ.get("S3_SIGNATURE_VERSION", "s3v4")
+S3_ADDRESSING_STYLE = os.environ.get("S3_ADDRESSING_STYLE", "path")
 
 RUNPOD_VOLUME = "/runpod-volume"
 MOSS_DIR = os.environ.get("MOSS_DIR", f"{RUNPOD_VOLUME}/moss-tts")
@@ -75,6 +77,8 @@ class Config:
         self.S3_SECRET_ACCESS_KEY = S3_SECRET_ACCESS_KEY
         self.S3_BUCKET_NAME = S3_BUCKET_NAME
         self.S3_REGION = S3_REGION
+        self.S3_SIGNATURE_VERSION = S3_SIGNATURE_VERSION
+        self.S3_ADDRESSING_STYLE = S3_ADDRESSING_STYLE
 
         self.AUDIO_VOICES_DIR = AUDIO_VOICES_DIR
         self.OUTPUT_AUDIO_DIR = OUTPUT_AUDIO_DIR

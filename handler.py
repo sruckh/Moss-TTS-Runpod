@@ -15,6 +15,7 @@ import boto3
 import runpod
 import torch
 import torchaudio
+from botocore.config import Config as BotoConfig
 
 import config as config_module
 from config import config
@@ -83,12 +84,31 @@ def get_s3_client():
     if missing:
         raise RuntimeError(f"Missing S3 configuration: {', '.join(missing)}")
 
+    endpoint_host = urlparse(config.S3_ENDPOINT_URL).hostname or ""
+    region = config.S3_REGION
+    if endpoint_host.endswith(".backblazeb2.com"):
+        parts = endpoint_host.split(".")
+        if len(parts) >= 4 and parts[0] == "s3":
+            inferred_region = parts[1]
+            if region in {"", "us-east-1"}:
+                region = inferred_region
+                log.info(
+                    f"Inferred S3 region '{region}' from endpoint host '{endpoint_host}' "
+                    f"(configured region was '{config.S3_REGION}')"
+                )
+
+    client_cfg = BotoConfig(
+        signature_version=config.S3_SIGNATURE_VERSION,
+        s3={"addressing_style": config.S3_ADDRESSING_STYLE},
+    )
+
     return boto3.client(
         "s3",
         endpoint_url=config.S3_ENDPOINT_URL,
-        region_name=config.S3_REGION,
+        region_name=region,
         aws_access_key_id=config.S3_ACCESS_KEY_ID,
         aws_secret_access_key=config.S3_SECRET_ACCESS_KEY,
+        config=client_cfg,
     )
 
 

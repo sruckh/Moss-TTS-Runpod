@@ -92,6 +92,9 @@ docker push your-registry/moss-tts:latest
 | `S3_ACCESS_KEY_ID` | S3 access key | `AKIAIOSFODNN7EXAMPLE` |
 | `S3_SECRET_ACCESS_KEY` | S3 secret key | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` |
 | `S3_BUCKET_NAME` | Target bucket name | `my-tts-output` |
+| `S3_REGION` | Signing region for S3 requests (for Backblaze B2 use your B2 region, e.g. `us-west-001`) | `us-east-1` |
+| `S3_SIGNATURE_VERSION` | Signature algorithm for presigned URLs | `s3v4` |
+| `S3_ADDRESSING_STYLE` | S3 URL style (`path`, `virtual`, `auto`) | `path` |
 
 #### Recommended
 
