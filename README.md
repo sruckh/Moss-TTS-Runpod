@@ -125,6 +125,7 @@ docker push your-registry/moss-tts:latest
 | `DEFAULT_AUDIO_TOP_P` | Nucleus sampling threshold (0-1) | `0.8` |
 | `DEFAULT_AUDIO_TOP_K` | Top-k sampling (1-200) | `25` |
 | `DEFAULT_AUDIO_REPETITION_PENALTY` | Repetition penalty (0.8-2.0) | `1.0` |
+| `DEFAULT_AUDIO_TOKENIZER_DEVICE` | Audio tokenizer device mode (`auto`, `cpu`, `cuda`); `auto` keeps it on CPU for 24GB cards | `auto` |
 | `DEFAULT_MAX_NEW_TOKENS` | Maximum tokens to generate (128-8192) | `4096` |
 | `DEFAULT_ENABLE_CHUNKING` | Enable text chunking for long content | `false` |
 | `DEFAULT_MAX_CHARS_PER_CHUNK` | Characters per chunk when chunking enabled | `300` |

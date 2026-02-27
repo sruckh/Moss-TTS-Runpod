@@ -144,6 +144,7 @@ class MossTTSInference:
         self.device = device or config.config.device
         self.dtype = (dtype or config.config.default_dtype).lower()
         self.attn_implementation = attn_implementation or config.config.default_attn_implementation
+        self.audio_tokenizer_device_mode = config.config.default_audio_tokenizer_device
         self.model_revision = config.config.MODEL_REVISION
         self.audio_tokenizer_repo = config.config.AUDIO_TOKENIZER_REPO
         self.audio_tokenizer_dir = config.config.AUDIO_TOKENIZER_DIR
@@ -296,7 +297,9 @@ class MossTTSInference:
                 else:
                     raise
             if hasattr(self._processor, "audio_tokenizer"):
-                self._processor.audio_tokenizer = self._processor.audio_tokenizer.to(self._torch_device)
+                audio_tok_device = self._resolve_audio_tokenizer_device()
+                self._processor.audio_tokenizer = self._processor.audio_tokenizer.to(audio_tok_device)
+                log.info("Audio tokenizer moved to %s", audio_tok_device)
 
             base_model_kwargs: Dict[str, Any] = {
                 "trust_remote_code": True,
@@ -349,6 +352,27 @@ class MossTTSInference:
             )
             return self.oom_token_cap_24gb
         return capped
+
+    def _resolve_audio_tokenizer_device(self) -> torch.device:
+        mode = (self.audio_tokenizer_device_mode or "auto").strip().lower()
+        if mode == "cpu":
+            return torch.device("cpu")
+        if mode == "cuda":
+            if self._torch_device is not None and self._torch_device.type == "cuda":
+                return self._torch_device
+            log.warning("DEFAULT_AUDIO_TOKENIZER_DEVICE=cuda requested but CUDA is unavailable; using CPU.")
+            return torch.device("cpu")
+
+        # auto: keep tokenizer on CPU for <=24GB VRAM GPUs to avoid preprocessing OOM.
+        if self._torch_device is None or self._torch_device.type != "cuda":
+            return torch.device("cpu")
+        try:
+            total_gb = torch.cuda.get_device_properties(self._torch_device).total_memory / (1024 ** 3)
+        except Exception:
+            return torch.device("cpu")
+        if total_gb <= 24.5:
+            return torch.device("cpu")
+        return self._torch_device
 
     def _resolve_voice_path_or_url(self, value: Optional[str]) -> Optional[str]:
         if not value:
