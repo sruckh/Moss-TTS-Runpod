@@ -29,6 +29,16 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _MODEL_INIT_LOCK = threading.Lock()
 
 
+def _is_local_only_miss(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "couldn't connect to 'https://huggingface.co'" in text
+        or "cannot find the requested files in the disk cache" in text
+        or "local_files_only" in text
+        or "localentrynotfounderror" in text
+    )
+
+
 def is_http_url(value: str) -> bool:
     try:
         parsed = urlparse(value)
@@ -237,27 +247,56 @@ class MossTTSInference:
             )
             log.info("Device=%s dtype=%s attn=%s", self._torch_device, self._torch_dtype, resolved_attn)
 
-            processor_kwargs: Dict[str, Any] = {
+            base_processor_kwargs: Dict[str, Any] = {
                 "trust_remote_code": True,
                 "local_files_only": local_files_only,
             }
             if self.model_revision and not local_files_only:
-                processor_kwargs["revision"] = self.model_revision
-            self._processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
+                base_processor_kwargs["revision"] = self.model_revision
+
+            processor_kwargs = dict(base_processor_kwargs)
+            try:
+                self._processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
+            except Exception as exc:
+                if local_files_only and _is_local_only_miss(exc):
+                    log.warning(
+                        "Local-only processor load missed files from source=%s; retrying with online fallback.",
+                        source_kind,
+                    )
+                    processor_kwargs["local_files_only"] = False
+                    if self.model_revision:
+                        processor_kwargs["revision"] = self.model_revision
+                    self._processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
+                else:
+                    raise
             if hasattr(self._processor, "audio_tokenizer"):
                 self._processor.audio_tokenizer = self._processor.audio_tokenizer.to(self._torch_device)
 
-            model_kwargs: Dict[str, Any] = {
+            base_model_kwargs: Dict[str, Any] = {
                 "trust_remote_code": True,
                 "dtype": self._torch_dtype,
                 "local_files_only": local_files_only,
             }
             if self.model_revision and not local_files_only:
-                model_kwargs["revision"] = self.model_revision
+                base_model_kwargs["revision"] = self.model_revision
             if resolved_attn:
-                model_kwargs["attn_implementation"] = resolved_attn
+                base_model_kwargs["attn_implementation"] = resolved_attn
 
-            self._model = AutoModel.from_pretrained(model_source, **model_kwargs).to(self._torch_device)
+            model_kwargs = dict(base_model_kwargs)
+            try:
+                self._model = AutoModel.from_pretrained(model_source, **model_kwargs).to(self._torch_device)
+            except Exception as exc:
+                if local_files_only and _is_local_only_miss(exc):
+                    log.warning(
+                        "Local-only model load missed files from source=%s; retrying with online fallback.",
+                        source_kind,
+                    )
+                    model_kwargs["local_files_only"] = False
+                    if self.model_revision:
+                        model_kwargs["revision"] = self.model_revision
+                    self._model = AutoModel.from_pretrained(model_source, **model_kwargs).to(self._torch_device)
+                else:
+                    raise
             self._model.eval()
 
             self._sample_rate = int(getattr(self._processor.model_config, "sampling_rate", config.DEFAULT_SAMPLE_RATE))
