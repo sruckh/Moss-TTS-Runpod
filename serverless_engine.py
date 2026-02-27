@@ -255,8 +255,7 @@ class MossTTSInference:
             self._torch_device = torch.device("cuda" if requested_device == "cuda" and cuda_available else "cpu")
             self._torch_dtype = self._resolve_dtype()
             model_source, local_files_only, source_kind = self._resolve_model_source()
-            audio_tokenizer_source, audio_tokenizer_local, audio_source_kind = self._resolve_audio_tokenizer_source()
-            processor_local_only = local_files_only and audio_tokenizer_local
+            audio_tokenizer_source, _, audio_source_kind = self._resolve_audio_tokenizer_source()
 
             resolved_attn = self._resolve_attn_implementation()
             log.info(
@@ -269,31 +268,28 @@ class MossTTSInference:
                 "Loading audio tokenizer from %s (source=%s, local_only=%s)",
                 audio_tokenizer_source,
                 audio_source_kind,
-                processor_local_only,
+                "n/a",
             )
             log.info("Device=%s dtype=%s attn=%s", self._torch_device, self._torch_dtype, resolved_attn)
 
-            base_processor_kwargs: Dict[str, Any] = {
+            # NOTE: The custom MOSS processor forwards unknown kwargs into
+            # ProcessorMixin.__init__, which raises on keys like local_files_only
+            # and revision. Only pass kwargs it explicitly consumes.
+            processor_kwargs: Dict[str, Any] = {
                 "trust_remote_code": True,
-                "local_files_only": processor_local_only,
                 "codec_path": audio_tokenizer_source,
             }
-            if self.model_revision and not processor_local_only and audio_source_kind != "huggingface-hub":
-                base_processor_kwargs["revision"] = self.model_revision
 
-            processor_kwargs = dict(base_processor_kwargs)
             try:
                 self._processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
             except Exception as exc:
-                if processor_local_only and _is_local_only_miss(exc):
+                if source_kind != "huggingface-hub" and _is_local_only_miss(exc):
                     log.warning(
-                        "Local-only processor load missed files from source=%s; retrying with online fallback.",
+                        "Processor load from source=%s missed files; retrying via HuggingFace hub.",
                         source_kind,
                     )
-                    processor_kwargs["local_files_only"] = False
-                    if self.model_revision and audio_source_kind != "huggingface-hub":
-                        processor_kwargs["revision"] = self.model_revision
-                    self._processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
+                    processor_kwargs["codec_path"] = self.audio_tokenizer_repo
+                    self._processor = AutoProcessor.from_pretrained(self.model_repo, **processor_kwargs)
                 else:
                     raise
             if hasattr(self._processor, "audio_tokenizer"):
