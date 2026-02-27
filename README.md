@@ -15,6 +15,7 @@ A production-ready serverless worker that provides high-quality neural TTS with 
 - **OGG/Opus Encoding** - Efficient audio compression via FFmpeg
 - **S3 Integration** - Automatic uploads to S3-compatible storage with presigned URLs
 - **Lazy Model Loading** - Model loads on first request, minimizing cold-start time
+- **24GB VRAM Guardrails** - Automatic token capping, one-shot OOM retry, and processor-stage tokenizer fallback
 - **Health Check Endpoint** - Monitor system status, GPU availability, and configuration
 - **Network Volume Persistence** - Model weights and dependencies cached on RunPod network volumes
 
@@ -61,7 +62,7 @@ The worker supports two modes:
 
 - RunPod account with Serverless enabled
 - S3-compatible storage (or any S3-compatible service)
-- GPU with 24GB+ VRAM recommended (for `MossTTSDelay-8B`)
+- GPU with 24GB+ VRAM (48GB+ recommended for longer generations and higher stability)
 
 ### Building the Container
 
@@ -118,6 +119,8 @@ docker push your-registry/moss-tts:latest
 | `OUTPUT_AUDIO_DIR` | Directory for temporary output | `/runpod-volume/moss-tts/output_audio` |
 | `MODEL_DIR` | Model weights location | `/runpod-volume/moss-tts/models/OpenMOSS-Team/MOSS-TTS` |
 | `AUDIO_TOKENIZER_DIR` | Audio tokenizer weights location | `/runpod-volume/moss-tts/models/OpenMOSS-Team/MOSS-Audio-Tokenizer` |
+| `MOSS_DIR` | Root working directory on the volume | `/runpod-volume/moss-tts` |
+| `MODELS_ROOT` | Root directory for local model repos | `/runpod-volume/moss-tts/models` |
 
 #### Optional Decoding Defaults
 
@@ -129,6 +132,9 @@ docker push your-registry/moss-tts:latest
 | `DEFAULT_AUDIO_REPETITION_PENALTY` | Repetition penalty (0.8-2.0) | `1.0` |
 | `DEFAULT_AUDIO_TOKENIZER_DEVICE` | Audio tokenizer device mode (`auto`, `cpu`, `cuda`); `auto` follows model device | `cuda` |
 | `DEFAULT_MAX_NEW_TOKENS` | Maximum tokens to generate (128-8192) | `4096` |
+| `DEFAULT_DTYPE` | Torch dtype (`auto`, `bfloat16`, `float16`, `float32`) | `auto` |
+| `DEFAULT_ATTN_IMPLEMENTATION` | Attention backend (`auto`, `flash_attention_2`, `sdpa`, `eager`, `none`) | `auto` |
+| `DEVICE` | Main inference device (`cuda` or `cpu`) | `cuda` |
 | `DEFAULT_ENABLE_CHUNKING` | Enable text chunking for long content | `false` |
 | `DEFAULT_MAX_CHARS_PER_CHUNK` | Characters per chunk when chunking enabled | `300` |
 | `DEFAULT_ENABLE_CROSSFADE` | Enable crossfade between chunks | `true` |
@@ -137,6 +143,24 @@ docker push your-registry/moss-tts:latest
 | `DEFAULT_STREAM_CROSSFADE_MS` | Streaming crossfade override | `100` |
 | `DEFAULT_CHUNK_PAUSE_MS` | Silence between streaming chunks | `300` |
 | `CLEANUP_DAYS` | Days before auto-deleting temp files | `2` |
+
+### 24GB VRAM Profile (RTX 4090 Class)
+
+For 24GB cards, use these as a stable starting point:
+
+```bash
+DEFAULT_MAX_NEW_TOKENS=2048
+OOM_TOKEN_CAP_24GB=2048
+OOM_RETRY_MAX_NEW_TOKENS=1536
+DEFAULT_AUDIO_TOKENIZER_DEVICE=cuda
+MAX_REFERENCE_AUDIO_SECONDS=20
+MAX_PREFIX_AUDIO_SECONDS=60
+```
+
+Notes:
+- The engine auto-caps `max_new_tokens` on ~24GB GPUs and retries once with a lower token limit after CUDA OOM.
+- If OOM happens during reference-audio preprocessing, the worker retries that step with the audio tokenizer on CPU for that request.
+- For cloned voice jobs on 24GB, keep reference clips short and avoid very high `max_new_tokens`.
 
 ## Usage
 
@@ -318,7 +342,7 @@ Error response:
 | `reference_audio` | string | No | Path or URL to reference audio for voice cloning |
 | `prefix_audio` | string | Conditional | Required when `mode=continuation` |
 | `expected_tokens` | int | No | Expected duration in tokens (for consistency) |
-| `max_new_tokens` | int | No | Maximum tokens to generate (128-8192, default: 4096) |
+| `max_new_tokens` | int | No | Maximum tokens to generate (128-8192, default: 4096; may be capped automatically on ~24GB GPUs) |
 | `audio_temperature` | float | No | Sampling temperature (0-5, default: 1.7) |
 | `audio_top_p` | float | No | Nucleus sampling threshold (0-1, default: 0.8) |
 | `audio_top_k` | int | No | Top-k sampling (1-200, default: 25) |
@@ -407,12 +431,13 @@ print(result)
 - Network volume may need more space
 
 **OOM during generation**
-- Reduce `max_new_tokens`
-- Switch to local model: `MODEL_REPO=OpenMOSS-Team/MOSS-TTS-Local-Transformer`
-- Use larger GPU class (24GB+ recommended)
+- Reduce `max_new_tokens` (try `1536-2048` on 24GB GPUs)
+- Keep `reference_audio` short (for example, 5-20 seconds)
+- The worker already performs one OOM retry at a lower token limit and can offload audio-tokenizer preprocessing to CPU when needed
+- Use larger GPU class (48GB+ recommended for longer or more complex jobs)
 
 **Slow cold start**
-- Expected on first boot (~2-5 minutes)
+- Expected on first boot, especially if model cache is empty
 - Warm-start by sending a tiny generation request after deployment
 - Subsequent requests use cached model
 
@@ -429,10 +454,10 @@ print(result)
 
 ## Performance Notes
 
-- **Cold start:** 2-5 minutes (first boot includes model download)
-- **Warm start:** 5-10 seconds (model already cached)
+- **Cold start:** ~1-15 minutes depending on cache state and model download requirements
+- **Warm start:** 5-20 seconds (model already cached, no first-request download)
 - **Generation time:** ~0.5-2x real-time depending on GPU and text length
-- **GPU Memory:** 8-16GB VRAM typical usage
+- **GPU Memory:** 24GB can work with tuned limits; 48GB+ gives better headroom for cloned voice and long outputs
 
 ## Contributing
 
